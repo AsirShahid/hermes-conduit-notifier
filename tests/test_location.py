@@ -819,6 +819,9 @@ class FakeClient:
     def load_state(self):
         return {"relay_url": "https://relay.example"}
 
+    def reachable(self):
+        return True
+
     def send_now(self, event):
         self.sent.append(event)
         if self.on_send:
