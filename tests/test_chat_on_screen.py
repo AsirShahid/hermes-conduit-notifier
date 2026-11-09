@@ -109,7 +109,7 @@ def test_the_file_is_private_and_no_temp_file_is_left(tmp_path):
 
 @pytest.mark.parametrize("body", [
     [],
-    {"device": "android", "session_ids": ["s-1"], "hold_s": 30},
+    {"device": "unknown-device", "session_ids": ["s-1"], "hold_s": 30},
     {"device": "iphone", "session_ids": ["s-1"], "hold_s": -1},
     {"device": "iphone", "session_ids": ["s-1"], "hold_s": 601},
     {"device": "iphone", "session_ids": ["s-1"], "hold_s": True},
@@ -249,3 +249,22 @@ def test_a_bad_body_is_a_400(client):
                           headers={"Content-Type": "application/json"})
     assert response.status_code == 400
     assert response.headers["cache-control"] == "no-store"
+
+
+def test_android_and_wear_holds_are_independent_of_each_other_and_apple(client):
+    for device in ("android", "wear", "iphone"):
+        response = client.put(f"{BASE}/notifications/on-screen", json={
+            "device": device, "session_ids": ["android-chat"], "hold_s": 90})
+        assert response.status_code == 200
+        assert response.json()["on_screen"] is True
+    for device in ("android", "wear"):
+        assert client.put(f"{BASE}/notifications/on-screen", json={"device": device, "hold_s": 0}).status_code == 200
+        assert on_screen.on_screen(client.home, "android-chat")
+    assert client.put(f"{BASE}/notifications/on-screen", json={"device": "iphone", "hold_s": 0}).status_code == 200
+    assert not on_screen.on_screen(client.home, "android-chat")
+
+
+def test_android_failed_turn_still_pushes(turn):
+    on_screen.hold(turn.home, "android", ["s-1"], 90)
+    assert turn() == []
+    assert turn(failed=True) == ["turn.failed"]

@@ -763,6 +763,8 @@ def call_delivery(answer: Any) -> str:
     """Where the relay says a call went, for the host's log: a call that
     rang nowhere is told apart from one that rang, without the phone's trace."""
     answer = answer if isinstance(answer, dict) else {}
+    if answer.get("queued") is True and answer.get("android"):
+        return "queued for the registered Android phone"
     if answer.get("duplicate") is True:
         # A retry of a request the relay already sent: it went the first time.
         return "already sent (a retry of the same call)"
@@ -781,6 +783,7 @@ def call_delivery(answer: Any) -> str:
 
 def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
     relay_failed = False
+    sent_android = False
     for delay in DELIVERY_DELAYS_S:
         if delay:
             _sleep(delay)
@@ -790,6 +793,7 @@ def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
         try:
             answer = client.send_now(event)
         except RuntimeError as error:
+            sent_android = sent_android or bool(getattr(error, "android", 0))
             if getattr(error, "status", 0) >= 500 and getattr(error, "detail", "") not in APNS_FAILURES:
                 # The relay (or a proxy in front of it) failed to handle it:
                 # worth another try.
@@ -802,6 +806,7 @@ def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
             logger.warning("Conduit call request refused: %s", error)
             break
         except Exception as error:  # noqa: BLE001 — transport: try again
+            sent_android = sent_android or bool(getattr(error, "android", 0))
             logger.warning("Conduit call request delivery failed: %s", error)
             continue
         # A relay that failed after taking the event answers the retry as a
@@ -811,5 +816,6 @@ def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
             return
         logger.warning("Conduit call request was taken but never sent")
         break
-    if fallback is not None and not client.enqueue(fallback):
+    queued = True if fallback is None else (client.enqueue(fallback, android=False) if sent_android else client.enqueue(fallback))
+    if not queued:
         logger.warning("Conduit could not queue the usual push for a call that didn't go out")

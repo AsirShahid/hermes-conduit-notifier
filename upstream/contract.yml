@@ -566,6 +566,8 @@ routes:
   - POST /pulse/proposals/{proposal_id}/undo
   - POST /pulse/rate
   - POST /pulse/report
+  - POST /push/android/register
+  - POST /push/android/unregister
   - GET /qwen-live/status
   - POST /qwen-live/token
   - POST /room-files

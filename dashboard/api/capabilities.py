@@ -33,6 +33,7 @@ ROUTE_CAPABILITIES = (
     "voice-chat-calls",
     "session-takeover",
     "e2e-notifications",
+    "android-push",
     # POST /e2e/rotate: keys rotate inline through a key exchange.
     "e2e-inline-rotation",
     "watch-tools",
@@ -46,6 +47,7 @@ ROUTE_CAPABILITIES = (
     "local-live-read-back",
     "desktop-views",
     "turn-surface",
+    "turn-surface-android",
     # POST /turn-surface/discard: forgets a report whose send failed.
     "turn-surface-discard",
     # POST /sessions/history-page: Hermes' page of a chat's rows, the ones
@@ -174,6 +176,7 @@ ROUTE_CAPABILITIES = (
     "cron-bot-chat-reports",
     "reply-sources",
     "chat-on-screen",
+    "chat-on-screen-android",
     # POST /predict, GET /predict: Conduit's Predictive features, answered
     # by a no-tools fork of the chat for the asking device only.
     "predict",

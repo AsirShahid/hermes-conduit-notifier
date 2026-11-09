@@ -1,5 +1,9 @@
 # Hermes Conduit Notifier
 
+This is the Android companion fork for [AsirShahid/hermes-conduit](https://github.com/AsirShahid/hermes-conduit/tree/android), based on upstream 0.151.0. Android delivery is adapted from [scasellas/hermes-conduit-notifier-Android](https://github.com/scasellas/hermes-conduit-notifier-Android/tree/android-unifiedpush) at `68c90e7`. Existing Apple routes remain available.
+
+For this fork, read [ANDROID.md](ANDROID.md) before installing or updating. The upstream installation instructions below describe the Apple project and do not select this Android branch.
+
 Hermes Conduit Notifier is the open-source Hermes plugin that connects a Hermes host to the [Hermes Conduit](https://github.com/kaishi00/hermes-conduit) iPhone, iPad and Apple Watch app. It started as the notification sender and now carries most of what Conduit needs from the host:
 
 - **Notifications and calls**: approval, input, reply, failure and background-task notifications, Hermes calling you (CallKit on the phone and Watch), and Lock Screen progress while a turn runs, all delivered through the Conduit push relay in [`relay/`](relay/), end-to-end encrypted where APNs allows.

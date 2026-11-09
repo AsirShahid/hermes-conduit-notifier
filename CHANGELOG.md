@@ -13,6 +13,15 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.151.1 (2026-11-09)
+
+### Fixes
+- Android notification deliveries stop after unregister, key replacement, disabling notifications or plugin unload. A phone notification cannot park a relay-only clarification.
+
+### New and improved
+- This Android fork adds encrypted UnifiedPush delivery, scoped registration, room invites and private Pulse notification levels on the current host plugin.
+- Android and Wear OS can hold a visible chat independently of Apple devices. Typed watch messages stay typed, and Android Auto receives driving-appropriate reply guidance.
+
 ## 0.151.0 (2026-11-09)
 
 ### New and improved

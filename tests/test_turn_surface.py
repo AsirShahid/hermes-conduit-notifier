@@ -143,14 +143,29 @@ def test_the_line_names_the_surface_and_how_it_was_entered():
 
 
 def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
-    for surface in ("iphone", "ipad", "mac", "vision"):
+    for surface in ("iphone", "ipad", "mac", "vision", "android"):
         assert surfaces.FORM_HINT in surfaces.line(surface, "typed")
         # Spoken, it's read out one question at a time; and only a message
         # Conduit says was typed hears it.
         assert surfaces.FORM_HINT not in surfaces.line(surface, "spoken")
         assert surfaces.FORM_HINT not in surfaces.line(surface)
-    for surface in ("watch", "carplay", "siri"):
+    for surface in ("watch", "carplay", "siri", "wear", "android_auto"):
         assert surfaces.FORM_HINT not in surfaces.line(surface, "typed")
+
+
+@pytest.mark.parametrize("surface,expected", [
+    ("android", "Android device"), ("wear", "Wear OS watch"), ("android_auto", "Android Auto")])
+def test_android_surfaces_use_the_actual_platform_and_explicit_input(surface, expected, client, gateway):
+    response = client.post(f"{BASE}/turn-surface", json=_report(surface, "quiet message", "typed"))
+    assert response.status_code == 200
+    context = gateway.turn(CONDUIT, "quiet message")
+    assert expected in context
+    assert "typed" in context
+    assert surfaces.SPOKEN_HINT not in context
+    if surface == "wear":
+        assert "screen is small" in context
+    if surface == "android_auto":
+        assert "likely driving" in context
 
 
 @pytest.mark.parametrize("body", [

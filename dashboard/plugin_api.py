@@ -29,6 +29,7 @@ they run:
                           has
     pairing               End-to-end encrypted notifications and pairing from
                           Conduit
+    android_push          Android UnifiedPush registration and status
     notifications         Cron and reply notifications, the chat Conduit has on
                           screen, and confirm prompts
     hermes_calls          Hermes calls you

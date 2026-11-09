@@ -82,6 +82,9 @@ SURFACES = {
     "watch": "the user's Apple Watch",
     "carplay": "CarPlay in the user's car",
     "siri": "Siri or a Shortcut",
+    "android": "the user's Android device",
+    "wear": "the user's Wear OS watch",
+    "android_auto": "Android Auto in the user's car",
 }
 INPUTS = ("typed", "spoken")
 # Said after the line where the surface changes what a good answer looks like.
@@ -89,12 +92,15 @@ HINTS = {
     "carplay": "They are likely driving: answer briefly, in plain sentences meant to be heard, "
                "with no tables, links or lists.",
     "watch": "Its screen is small: keep the answer short, with no tables.",
+    "wear": "Its screen is small: keep the answer short, with no tables.",
+    "android_auto": "They are likely driving: answer briefly, in plain sentences meant to be heard, "
+                    "with no tables, links or lists.",
 }
 # Said for a message typed on a screen, where a clarify batch with open
 # questions shows as a form (hermes-conduit's ClarifyActivity.isForm). Only
 # when Conduit says it was typed: spoken, a form is read out one question at
 # a time, and Conduit reports how every message it sends was entered.
-SCREENS = ("iphone", "ipad", "mac", "vision")
+SCREENS = ("iphone", "ipad", "mac", "vision", "android")
 FORM_HINT = ("When you need several details only the user can give (like dates or a budget), ask them in one "
              "clarify call with open questions: Conduit shows it as a form, and they may leave some blank.")
 # Said for a spoken message, a voice call's or a voice job's: the answer is

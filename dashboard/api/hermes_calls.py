@@ -11,7 +11,7 @@ from typing import Any, Callable, Dict, Optional
 
 from fastapi import HTTPException, Request, Response
 
-from . import core
+from . import android_push, core
 
 router = core.router
 
@@ -58,7 +58,7 @@ def calls_status() -> Dict[str, Any]:
     module = _calls_store()
     store = module.CallStore(core._calls_home())
     return {
-        "paired": core._load_pairing_state(core._pairing_state_path()) is not None,
+        "paired": (core._load_pairing_state(core._pairing_state_path()) is not None or android_push._android_registered()),
         "settings": store.settings(),
         "bounds": {key: {"min": low, "max": high} for key, (low, high) in module.INT_BOUNDS.items()},
         # The longest "what's worth a call" note the host keeps.
@@ -84,7 +84,7 @@ def add_call_watch(body: Any) -> Dict[str, Any]:
     tells the user itself."""
     if not isinstance(body, dict):
         raise core.TokenError(400, "Expected a JSON object")
-    if core._load_pairing_state(core._pairing_state_path()) is None:
+    if core._load_pairing_state(core._pairing_state_path()) is None and not android_push._android_registered():
         raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
     store = _calls_store().CallStore(core._calls_home())
     try:
@@ -123,7 +123,7 @@ def set_call_presence(body: Any) -> Dict[str, Any]:
     renews it during the call), or not (0): nothing rings meanwhile."""
     if not isinstance(body, dict):
         raise core.TokenError(400, "Expected a JSON object")
-    if core._load_pairing_state(core._pairing_state_path()) is None:
+    if core._load_pairing_state(core._pairing_state_path()) is None and not android_push._android_registered():
         raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
     try:
         return _calls_store().CallStore(core._calls_home()).set_presence(body.get("hold_s"))
@@ -136,7 +136,7 @@ def record_call_outcome(body: Any) -> Dict[str, Any]:
     turn of its chat hears so."""
     if not isinstance(body, dict):
         raise core.TokenError(400, "Expected a JSON object")
-    if core._load_pairing_state(core._pairing_state_path()) is None:
+    if core._load_pairing_state(core._pairing_state_path()) is None and not android_push._android_registered():
         raise core.TokenError(409, "This Hermes profile isn't paired with Conduit")
     try:
         return _calls_store().CallStore(core._calls_home()).record_outcome(

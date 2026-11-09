@@ -22,7 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from fastapi import HTTPException, Request, Response
 
-from . import capabilities, core, watch_tools
+from . import android_push, capabilities, core, watch_tools
 
 logger = core.logger
 router = core.router
@@ -448,7 +448,7 @@ async def post_e2e_rotate(request: Request, response: Response, profile: Optiona
 async def get_e2e(response: Response, profile: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     try:
-        return {"ok": True, **(await core._run_scoped(profile, e2e_status))}
+        return {"ok": True, **(await core._run_scoped(profile, lambda: android_push._with_android_status(e2e_status())))}
     except core.TokenError as exc:
         raise HTTPException(status_code=exc.status, detail=str(exc), headers={"Cache-Control": "no-store"})
     except HTTPException as exc:

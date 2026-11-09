@@ -16,7 +16,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, Request, Response
 
-from . import core
+from . import android_push, core
 
 logger = core.logger
 router = core.router
@@ -557,7 +557,7 @@ async def get_location_status(response: Response, profile: Optional[str] = None,
     # fresh fix: the same pairing gate as the tool's own (not_paired).
     return await _location_route(response, profile, lambda: _location_call(lambda store: {
         **store.status(device_id), "crypto": _location_store().crypto_available(),
-        "locate": {"available": core._load_pairing_state(core._pairing_state_path()) is not None}}), "status")
+        "locate": {"available": (core._load_pairing_state(core._pairing_state_path()) is not None or android_push._android_registered())}}), "status")
 
 
 @router.post("/location/key")

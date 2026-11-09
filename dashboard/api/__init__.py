@@ -28,6 +28,7 @@ MODULES = (
     "chats",
     "history",
     "pairing",
+    "android_push",
     "notifications",
     "hermes_calls",
     "settings",

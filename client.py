@@ -288,7 +288,7 @@ def unpair() -> bool:
     return True
 
 
-def enqueue(event: dict[str, Any]) -> bool:
+def enqueue(event: dict[str, Any], *, android: bool = True) -> bool:
     """Queue an event for asynchronous relay delivery.
 
     Returns True when the event was accepted by the local delivery queue and
@@ -299,12 +299,19 @@ def enqueue(event: dict[str, Any]) -> bool:
     on this event, so a drop has to fall back to the native clarify path
     instead of polling an answer that can never arrive.
     """
-    state = load_state()
-    if _stopped.is_set() or not state:
+    if _stopped.is_set():
         return False
+    sent_android = dispatch_android(event) if android else 0
+    # Android answers on its own gateway socket, never the relay's clarify
+    # decision poll. Its delivery cannot make that poll eligible.
+    decision = event.get("decision")
+    android_accepted = sent_android > 0 and not (isinstance(decision, dict) and decision.get("kind") == "clarify")
+    state = load_state()
+    if not state:
+        return android_accepted
     if _paused_until(state) > time.monotonic():
         logger.info("Conduit notification dropped for %s: %s", event.get("type", "event"), _pause_reason(state))
-        return False
+        return android_accepted
     _start_worker()
     try:
         # Hermes can serve several profiles in one process, each through a
@@ -314,17 +321,22 @@ def enqueue(event: dict[str, Any]) -> bool:
         _events.put_nowait((contextvars.copy_context(), event))
     except queue.Full:
         logger.warning("Conduit notification queue is full; dropping %s", event.get("type", "event"))
-        return False
+        return android_accepted
     return True
 
 
-def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
+def send_now(event: dict[str, Any], timeout: float = 15.0, *, android: bool = True) -> dict[str, Any]:
+    sent_android = dispatch_android(event) if android and not _stopped.is_set() else 0
     state = load_state()
     if not state:
+        if sent_android:
+            return {"accepted": True, "queued": True, "android": sent_android}
         raise RuntimeError("This Hermes profile is not paired with Conduit.")
     try:
         answer = _send(event, state, timeout)
     except RelayRejected as error:
+        if sent_android:
+            error.android = sent_android
         # `test` is a probe too: `status` should say what it just saw. A
         # refusal doesn't start a pause (one person typed it), but an
         # accepted test ends one.
@@ -333,11 +345,41 @@ def send_now(event: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
         _note_push(False, error)
         raise
     except Exception as error:
+        if sent_android:
+            error.android = sent_android
         _note_push(False, error)
         raise
     record_relay_accepted(state)
     _note_push(True)
-    return answer
+    return {**answer, "android": sent_android} if sent_android and isinstance(answer, dict) else answer
+
+
+def dispatch_android(event: dict[str, Any]) -> int:
+    """Queues a sealed event under the calling profile, independent of APNs."""
+    try:
+        from . import android_push
+        if _stopped.is_set() or not android_push.handles(event.get("type")):
+            return 0
+        home = get_hermes_home()
+        if not android_push.registered(home):
+            return 0
+        state = load_state()
+        return android_push.dispatch(_redacted(event, state) if state else event, home)
+    except Exception:
+        logger.warning("Conduit Android push dispatch failed for %s", event.get("type", "event"), exc_info=True)
+        return 0
+
+
+def android_registered() -> bool:
+    try:
+        from . import android_push
+        return android_push.registered(get_hermes_home())
+    except Exception:
+        return False
+
+
+def reachable() -> bool:
+    return load_state() is not None or android_registered()
 
 
 def _send(event: dict[str, Any], state: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
@@ -828,6 +870,8 @@ def start() -> None:
     again without a fresh import)."""
     _clear_refusal()
     _stopped.clear()
+    from . import android_push
+    android_push.deliverer.start()
 
 
 def stop(timeout: float = 1.0) -> None:
@@ -835,6 +879,8 @@ def stop(timeout: float = 1.0) -> None:
     worker exits after the send in progress (its retries end), and later
     enqueue() calls are refused. Waits up to ``timeout`` for the worker."""
     global _worker_started, _worker, _generation
+    from . import android_push
+    android_push.deliverer.stop()
     with _worker_lock:
         _stopped.set()
         _generation += 1

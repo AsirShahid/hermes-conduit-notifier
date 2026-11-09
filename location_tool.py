@@ -467,7 +467,7 @@ def _locate(store: LocationStore, view: dict[str, Any], profile: str, sleep: Cal
         return {"ok": False, "error": "background_off",
                 "note": "The user shares location only while talking to Hermes, so a fresh lookup isn't possible. "
                         "Use action now, or ask them."}
-    if client.load_state() is None:
+    if not client.reachable():
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with Conduit for notifications, so it can't reach the phone. "
                         "Use action now."}

@@ -106,7 +106,7 @@ def available() -> bool:
     caches a tool's availability for the whole process, across profiles, so
     it can't follow one profile's call settings (see call_watches)."""
     try:
-        return client.load_state() is not None
+        return client.reachable()
     except Exception:  # noqa: BLE001
         return False
 
@@ -140,7 +140,7 @@ def _handle(args: Any, session_id: Any, is_child: Callable[[Any], bool],
         return {"ok": False, "error": "use_report",
                 "note": (f"This is a run of a call watch: report with {call_watches.REPORT_TOOL} instead. It calls "
                          "when it's time and tells you what to reply.")}
-    if client.load_state() is None:
+    if not client.reachable():
         return {"ok": False, "error": "not_paired",
                 "note": "This Hermes profile isn't paired with the Conduit app, so it can't call. Say so in your reply."}
     if not asked:

@@ -14,7 +14,7 @@ name: Tests
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, android]
   schedule:
     - cron: "30 7 * * *"
   workflow_dispatch:

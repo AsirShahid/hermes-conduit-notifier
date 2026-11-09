@@ -55,7 +55,7 @@ from typing import Any, Iterable
 
 DIRECTORY = "conduit-on-screen"
 # Conduit's TurnSurface places a chat can be on screen on.
-DEVICES = ("iphone", "ipad", "mac", "vision", "watch")
+DEVICES = ("iphone", "ipad", "mac", "vision", "watch", "android", "wear")
 MAX_HOLD_S = 600
 # A turn longer than this pushes even while held (see attended).
 MAX_TURN_S = 1800.0
