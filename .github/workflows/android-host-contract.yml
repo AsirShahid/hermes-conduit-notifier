@@ -40,13 +40,24 @@ jobs:
           set -euo pipefail
           export HERMES_REF="$(cat "$RUNNER_TEMP/hermes-ref.txt")"
           export HERMES_BIN="$RUNNER_TEMP/hermes/.venv/bin/hermes"
+          # These three modules start their own backend. Hermes' machine-level
+          # host lease refuses a second backend while the shared session fixture
+          # is alive, even with another HERMES_HOME. Retire it between processes.
+          result=0
           "$RUNNER_TEMP/hermes/.venv/bin/python" -m pytest --rootdir=upstream upstream \
-            -rfEsxX -p no:cacheprovider --junitxml="$RUNNER_TEMP/android-host-contract.xml"
+            --ignore=upstream/test_bot_work.py --ignore=upstream/test_compaction_skip.py \
+            --ignore=upstream/test_cron_bot_chat.py \
+            -rfEsxX -p no:cacheprovider --junitxml="$RUNNER_TEMP/android-host-contract.xml" || result=1
+          for module in test_bot_work test_compaction_skip test_cron_bot_chat; do
+            "$RUNNER_TEMP/hermes/.venv/bin/python" -m pytest --rootdir=upstream "upstream/$module.py" \
+              -rfEsxX -p no:cacheprovider --junitxml="$RUNNER_TEMP/android-host-$module.xml" || result=1
+          done
+          exit "$result"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: android-host-contract
           path: |
             ${{ runner.temp }}/hermes-ref.txt
-            ${{ runner.temp }}/android-host-contract.xml
+            ${{ runner.temp }}/android-host-*.xml
           if-no-files-found: ignore
