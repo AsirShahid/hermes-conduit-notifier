@@ -24,4 +24,8 @@ The phone uses the existing dashboard sign-in. Push registration needs a Unified
 
 ## Validation
 
-The focused Android transport, API layout, visible-chat, turn-surface, calls and E2E suites passed 465 tests on 2026-11-09 before the final independent room-invite preference adjustment. The full plugin suite is being run separately. Neither proves delivery through a physical phone distributor or a live Wear OS device.
+The [full CI run at `24bb938`](https://github.com/AsirShahid/hermes-conduit-notifier/actions/runs/42707089746) passed the plugin, relay and mailbox suites on 2026-11-09. Focused location, maps, Android push and calls tests also passed 387 tests, including Android-only request delivery when the Apple relay refuses or raises an error.
+
+The [real Hermes v0.23.0 contract run at `fd24f05`](https://github.com/AsirShahid/hermes-conduit-notifier/actions/runs/42709708705) passed 81 tests with four expected failures. It includes unauthenticated Android registration rejection and separate authenticated profile registrations through an actual dashboard/plugin worker. Independent backend fixtures run in separate processes to avoid competing for Hermes' machine lease.
+
+These checks do not prove delivery through a physical phone distributor or a live Wear OS device. Live deployment and phone-side registration are separate steps.
