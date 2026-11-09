@@ -855,6 +855,32 @@ def test_locate_without_a_token_falls_back_and_spends_nothing(home, monkeypatch)
     store.start_locate()  # the budget wasn't spent
 
 
+@pytest.mark.parametrize("relay_raises", [False, True])
+def test_android_locate_waits_for_its_answer_despite_apple_relay_failure(home, monkeypatch, relay_raises):
+    store, phone = _shared(home, fix=fix("significant"))
+
+    class AndroidClient(FakeClient):
+        def send_now(self, event):
+            self.sent.append(event)
+            if relay_raises:
+                error = RuntimeError("Apple relay unavailable")
+                error.android = 1
+                raise error
+            return {"accepted": True, "delivered": False, "android": 1, "queued": True}
+
+    fake = AndroidClient(None)
+    monkeypatch.setattr(tool, "client", fake)
+
+    def answer_during_wait(_):
+        locate_id = fake.sent[0]["locate"]["id"]
+        store.ingest(phone.seal(phone.batch(fix=fix("locate", id="f_android", at="2026-10-13T07:00:00+01:00"),
+                                            locate_id=locate_id)))
+
+    result = _call({"action": "locate"}, profile="work", sleep=answer_during_wait)
+    assert result["fresh"] is True
+    assert len(fake.sent) == 1
+
+
 def test_a_relay_without_a_reason_or_with_a_strange_one_gets_the_plain_note(home, monkeypatch):
     _shared(home, fix=fix("significant"))
     for answer in ({"accepted": True, "delivered": False}, {"delivered": False, "reason": "no\nlocation " * 50},

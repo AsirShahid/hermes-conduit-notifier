@@ -477,11 +477,16 @@ def _locate(store: LocationStore, view: dict[str, Any], profile: str, sleep: Cal
     try:
         answer = client.send_now(event)
     except Exception as error:  # noqa: BLE001
-        logger.warning("Conduit location request failed: %s", error)
-        store.cancel_locate(locate_id)
-        return {**_fix_view(view, store.clock()), "ok": False, "error": "unreachable",
-                "note": "The phone couldn't be asked just now. Use action now."}
-    if isinstance(answer, dict) and answer.get("delivered") is False:
+        if getattr(error, "android", 0):
+            # Android's independent queue accepted this request. An Apple
+            # relay failure must not cancel the phone's pending answer.
+            answer = {"queued": True, "android": error.android}
+        else:
+            logger.warning("Conduit location request failed: %s", error)
+            store.cancel_locate(locate_id)
+            return {**_fix_view(view, store.clock()), "ok": False, "error": "unreachable",
+                    "note": "The phone couldn't be asked just now. Use action now."}
+    if isinstance(answer, dict) and answer.get("delivered") is False and not answer.get("android"):
         store.cancel_locate(locate_id)
         blocked = not_delivered("locate", answer, "fresh lookups")
         return {**_fix_view(view, store.clock()), **blocked, "note": blocked["note"] + " Use action now."}

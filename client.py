@@ -351,7 +351,7 @@ def send_now(event: dict[str, Any], timeout: float = 15.0, *, android: bool = Tr
         raise
     record_relay_accepted(state)
     _note_push(True)
-    return {**answer, "android": sent_android} if sent_android and isinstance(answer, dict) else answer
+    return {**answer, "queued": True, "android": sent_android} if sent_android and isinstance(answer, dict) else answer
 
 
 def dispatch_android(event: dict[str, Any]) -> int:

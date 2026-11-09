@@ -267,10 +267,13 @@ def _ask_phone(store: LocationStore, phone: dict[str, Any], request: dict[str, A
     try:
         sent = client.send_now(event)
     except Exception as error:  # noqa: BLE001
-        logger.warning("Conduit maps request failed: %s", error)
-        store.cancel_maps(request_id)
-        return {"ok": False, "error": "unreachable", "note": "The phone couldn't be asked just now."}
-    if isinstance(sent, dict) and sent.get("delivered") is False:
+        if getattr(error, "android", 0):
+            sent = {"queued": True, "android": error.android}
+        else:
+            logger.warning("Conduit maps request failed: %s", error)
+            store.cancel_maps(request_id)
+            return {"ok": False, "error": "unreachable", "note": "The phone couldn't be asked just now."}
+    if isinstance(sent, dict) and sent.get("delivered") is False and not sent.get("android"):
         store.cancel_maps(request_id)
         return location_tool.not_delivered("maps", sent, "maps lookups")
     waited = 0.0

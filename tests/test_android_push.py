@@ -704,7 +704,7 @@ def test_what_the_relay_gets_is_unchanged_by_android(profile, clock):
     _register(profile.home, clock, gateway="gw")
     answer = client.send_now({**event})
     assert json.dumps(profile.relay[-1], sort_keys=True) == without
-    assert answer["android"] == 1 and len(profile.endpoint.posts) == 1
+    assert answer["android"] == 1 and answer["queued"] is True and len(profile.endpoint.posts) == 1
     # The Android key never reaches the relay, nor the endpoint the relay.
     assert "ntfy" not in json.dumps(profile.relay)
 

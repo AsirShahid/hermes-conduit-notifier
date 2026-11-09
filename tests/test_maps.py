@@ -279,6 +279,27 @@ def test_directions_go_to_the_phone_and_come_back_readable(home, monkeypatch):
     assert store.reads()[0]["action"] == "maps directions"
 
 
+@pytest.mark.parametrize("relay_raises", [False, True])
+def test_android_map_lookup_keeps_waiting_after_apple_relay_failure(home, monkeypatch, relay_raises):
+    store, phone = _shared(home, fix=fix("significant"))
+
+    class AndroidClient(FakeClient):
+        def send_now(self, event):
+            self.sent.append(event)
+            if relay_raises:
+                error = RuntimeError("Apple relay unavailable")
+                error.android = 1
+                raise error
+            return {"accepted": True, "delivered": False, "android": 1, "queued": True}
+
+    fake = AndroidClient(None)
+    monkeypatch.setattr(maps, "client", fake)
+    answer = _call({"action": "directions", "to": "home"}, profile="work",
+                   sleep=lambda _: _answering(store, phone)(fake.sent[0]))
+    assert answer["ok"] is True and answer["routes"]
+    assert len(fake.sent) == 1
+
+
 @pytest.mark.parametrize("place, ref", [
     ("me", {"me": True}),
     ("Work", {"saved": "p_work"}),
