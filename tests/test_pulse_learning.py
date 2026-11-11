@@ -491,6 +491,28 @@ def test_the_brief_comes_every_morning_with_nothing_held_but_not_before_its_time
     assert len(live.sent()) == 1  # once a day
 
 
+def test_one_brief_when_several_processes_reach_its_time_together(live, monkeypatch):
+    # Eric's host, 6 Nov: each profile's process sent the brief at 05:00, four in one second.
+    brief_due_now(live)
+    claimed = []
+    real_swap = live.store.swap
+
+    def swap(key, old, new):  # another process claims the slot between this one's read and write
+        if key == pulse.brief.CLAIM and not claimed:
+            claimed.append(new)
+            real_swap(key, old, new)
+        return real_swap(key, old, new)
+    monkeypatch.setattr(live.store, "swap", swap)
+    assert not pulse._maybe_brief(live.store, live.home, time.time()) and live.store.in_flight() == []
+    monkeypatch.setattr(live.store, "swap", real_swap)  # the live fixture's own patches stay
+    assert not pulse._maybe_brief(live.store, live.home, time.time())  # its claim stands for this slot
+    assert live.store.in_flight() == []
+    # A claim whose process died before recording its attempt lapses, and the brief goes.
+    assert pulse._maybe_brief(live.store, live.home, time.time() + pulse.brief.CLAIM_S + 1)
+    [attempt] = live.store.attempts_since(pulse.brief.BRIEF, 0)
+    assert attempt["state"] != store.REFUSED
+
+
 def test_a_brief_with_nothing_kept_still_reads_the_calendar(live, monkeypatch):
     live.store.set("memory", True)
     monkeypatch.setattr(pulse.report, "phone_context",
@@ -884,7 +906,8 @@ def test_a_delivered_brief_lands_on_the_pulse_screen_as_hermes_wrote_it(live):
 def found(line, kind="follow-up", **more):
     """A thing the report's list found, brought up."""
     return {"kind": kind, "bring_up": True, "value": 4, "skip": "", "actionable": True, "line": line,
-            "why": "It came up today.", "source": "notes", "area": "work", **more}
+            "why": "It came up today.", "source": "notes", "area": "work",
+            "shape": "status", "facts": {"label": "Today", "state": "warn"}, **more}
 
 
 def sent_report(live, *, remembered=(), finds=()):
@@ -936,7 +959,8 @@ def test_a_report_becomes_one_card_per_item(reporting, monkeypatch):
     live.store.set("memory", True)
     attempt = sent_report(live, remembered=[{
         "ref": item_id, "bring_up": True, "value": 3, "skip": "", "actionable": True,
-        "line": "Hermes still owes the deploy note (from Monday)", "why": "You were promised it Monday."}],
+        "line": "Hermes still owes the deploy note (from Monday)", "why": "You were promised it Monday.",
+        "shape": "promise", "facts": {"said": "I'll write the deploy note"}}],
         finds=[found("The dentist is Friday at 9 (calendar).", "date", source="calendar"),
                found("Something odd", "weird", value=3)])
     live.db.message("user", attempt["text"])
@@ -1513,6 +1537,30 @@ def test_a_report_card_carries_its_reason_and_one_written_without_a_list_has_non
     assert live.store.card(plain)["why"] == ""
     feed = {card["id"]: card for card in control.feed(live.store)["cards"]}
     assert feed[with_why]["why"] and feed[plain]["why"] == ""
+
+
+def test_a_report_line_that_comes_up_with_no_pick_is_counted_plain(live):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    pick = pulse.pulse_picks
+    now = time.time()
+    drawn = pick.dumps({"line": "Dentist Friday at 9", "detail": "", "shape": "date",
+                        "facts": {"day": "2026-11-13", "what": "Dentist", "whose": ""}, "actions": [],
+                        "incident": {"card": "new"}})
+    learning.add_noticed_cards(
+        live.store, turn=SimpleNamespace(session_id=SID, reply_id=7),
+        lines=[("date", "Dentist Friday at 9", None), ("fact", "Ana is in town", None)], chat_id=SID,
+        chat_title="Pulse", shown={}, kinds=followup.report.KINDS, item_chat_title=lambda item: "", now=now,
+        looks=[drawn, ""])
+    day = datetime.fromtimestamp(now, timezone.utc).strftime("%Y-%m-%d")
+    counts = live.store.get(pick.PICK_COUNTS)[day]
+    assert counts["plain:no_pick"] == 1 and counts["shape:date"] == 1
+    # A report with no picks at all (one an older build listed) counts none.
+    learning.add_noticed_cards(
+        live.store, turn=SimpleNamespace(session_id=SID, reply_id=8), lines=[("fact", "Bo is back", None)],
+        chat_id=SID, chat_title="Pulse", shown={}, kinds=followup.report.KINDS, item_chat_title=lambda item: "",
+        now=now + 1)
+    assert live.store.get(pick.PICK_COUNTS)[day]["plain:no_pick"] == 1
 
 
 def test_a_report_card_keeps_what_learning_did_and_how_it_came_up(live):

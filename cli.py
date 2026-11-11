@@ -58,7 +58,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     work.add_argument("--policy", choices=["lookups", "open", "strict"], default=None,
                       help="for on: what the coordinator does itself: quick things, any tool for a few steps a "
                            "turn (lookups, the default), everything (open), or only coordinating (strict)")
-    work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 2)")
+    work.add_argument("--max-running", type=int, default=None, help="for on: workstreams running at once (default 4)")
     work.add_argument("--after-restart", choices=["continue", "ask"], default=None,
                       help="for on: a workstream a restart cut off with nothing uncertain in flight is continued "
                            "once (continue, the default) or left for the coordinator to ask about (ask)")
@@ -66,6 +66,10 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
                       help="for on: what the bot's workstreams ask approval for: as its chats do in Hermes (chats, "
                            "the default), the user's own go-ahead before a step that can't be undone (ask), or "
                            "nothing (off)")
+    work.add_argument("--coordination", choices=["off", "ask", "auto"], default=None,
+                      help="for on: how the Bot Chat keeps its workstreams working together in the turns it "
+                           "starts itself: it asks you before it starts, stops or redirects work (ask, the "
+                           "default), does those on its own (auto), or only passes reports on (off)")
     work.add_argument("--model", default=None, metavar="[PROVIDER:]MODEL",
                       help="for on: the model new workstreams start on, like anthropic:claude-sonnet-5-5; the "
                            "first colon ends the provider, so a model with one of its own is ollama:qwen3:8b "
@@ -487,6 +491,8 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
                 pass
         if picked:
             store.set_workstream_model(None if picked.lower() == "bot" else chosen)
+        if getattr(args, "coordination", None):
+            store.set_coordination(args.coordination)
     elif action == "off":
         store.set_policy("off")
     mode = store.policy()
@@ -495,8 +501,16 @@ def _work_on_registry(store: Any, args: argparse.Namespace, action: str) -> int:
              f"up to {store.max_running()} running at once; after a restart, safe work is "
              f"{'continued' if store.after_restart() == 'continue' else 'left to ask about'}; workstream "
              f"approvals: {store.workstream_approvals()}; workstream model: "
-             f"{store.workstream_model().get('model') or OWN_MODEL})"
+             f"{store.workstream_model().get('model') or OWN_MODEL}; coordination: {store.coordination()})"
              if mode != "off" else ""))
+    if action == "status" and mode != "off" and store.coordination() != "off":
+        from . import work_watch
+
+        day = work_watch.metrics(store, time.time() - 24 * 3600.0)
+        print(f"  coordination, last 24 h: the watch read {day['watch_reads']} time(s) ({day['watch_tokens']} tokens) "
+              f"and flagged {day['flags']} ({day['flags_held']} kept without a turn); {day['hidden_turns']} work "
+              f"update turn(s); {day['sent']} message(s) sent to workstreams ({day['sent_own']} on its own): "
+              f"{day['delivered']} in their chats, {day['waiting']} not yet, {day['not_arrived']} didn't arrive")
     if action == "status":
         for work in store.list(include_closed=False, limit=20):
             print(f"  {work.ref}  {work.status:<11} {_printable(work.title)}")

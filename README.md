@@ -9,7 +9,7 @@ Hermes Conduit Notifier is the open-source Hermes plugin that connects a Hermes 
 - **Notifications and calls**: approval, input, reply, failure and background-task notifications, Hermes calling you (CallKit on the phone and Watch), and Lock Screen progress while a turn runs, all delivered through the Conduit push relay in [`relay/`](relay/), end-to-end encrypted where APNs allows.
 - **Live voice**: single-use Gemini Live tokens, temporary Qwen Live credentials, GPT-Live sessions on the host's ChatGPT subscription or API key, Grok Live relayed with the host's xAI sign-in, Local Live and Classic voice through your own speech server, voice web lookups, memory and personality for voice, and saved call transcripts.
 - **Apple Watch**: short-lived grants that let a Watch call run lookups and Hermes jobs, answer what Hermes waits on in a call from Hermes, and stream GPT-Live, Grok and Local Live audio, through the relay, sealed end to end.
-- **Phone data the user opts into**: Apple Health, location, maps, calendar, reminders, Focus, phone status, contacts and alarms, sent by the phone straight to this host and sealed end to end, with the `conduit_health`, `conduit_location`, `conduit_maps`, `conduit_calendar`, `conduit_phone` and `conduit_contacts` tools for the agent, and events from the user's Shortcuts automations through `conduit_inbox`.
+- **Phone data the user opts into**: Apple Health, location, maps, calendar, reminders, Focus, phone status, contacts, alarms and the Shortcuts Hermes may run, sent by the phone straight to this host and sealed end to end, with the `conduit_health`, `conduit_location`, `conduit_maps`, `conduit_calendar`, `conduit_phone` and `conduit_contacts` tools for the agent, and events from the user's Shortcuts automations through `conduit_inbox`.
 - **Conduit extras**: rich cards and on-screen cards during calls, Artifacts and the chat's Folder, group pictures, chat takeover, cron notification settings, Conduit settings the agent can change, and one-tap pairing and updates from the app.
 
 Every route sits behind the Hermes dashboard's own auth. The plugin holds no Apple Push Notification service key and no dashboard credentials: Apple credentials stay on the push relay, so self-hosted users never need to copy a shared signing key onto their gateway, and provider keys and sign-ins never leave this host. What each party can see is in the [privacy policy](https://kaishi00.github.io/hermes-conduit-notifier/privacy/).
@@ -142,6 +142,8 @@ The plugin currently emits notifications for:
 - call requests: a job you asked to be called about has ended, Hermes asked to call you, or (alert calls) Hermes has waited a minute on your approval or answer, or a turn failed (see [Hermes calls you](#hermes-calls-you-plugin-013))
 - room invites, to a Conduit that shows them: someone you've linked invited you to a room (plugin 0.105+, relay 0.21+; see [Rooms with people you've linked](#rooms-with-people-youve-linked-plugin-089)). Your agents' turns in a room someone else hosts send no reply or failure notification, since the room shows them. In a room this Hermes hosts, a turn's reply, failure, finished background task and approval open the room, titled with its name, not the bot's hidden chat there (plugin 0.150.1+), and a lead's pick of who answers sends nothing.
 
+A turn in a session Hermes doesn't list as a conversation sends no reply, failure or background-task notification and shows no Lock Screen progress (plugin 0.153.7+): a script's `hermes chat --source tool`, a one-shot `hermes chat -q` or `-z`, and a Kanban worker. Their answers go to whoever ran them, and Conduit's chat lists hide those sessions. An approval or question from one still notifies, and so do a call you asked for and a notification the run wrote with `conduit_notify`.
+
 A fork of a chat never notifies as the chat (plugin 0.119.1+): Conduit's predictions (`/predict`), a step summary's `/btw` and the self-improvement review each answer from a fork that runs under the chat's session id, and on a Hermes that runs plugin hooks for forks (0.21 among them) the plugin keeps the fork's answer from going out as a reply and off the chat's Live Activity. An exact `[Silent]` assistant response does not emit a completion notification. Reply and task bodies are sent as plain text: Markdown fences, emphasis, headings, link targets and table rules are dropped (plugin 0.35+). No notification shows a file's path on the host (plugin 0.71.2+): a `MEDIA:` tag in a reply, a question, an approval, a call or a phone change, and in the answer card or call screen that comes with it, reads as 📎 and the file's name, or its type (`📎 PPTX`) when the name is only a hash, and `[[audio_as_voice]]` and `[[as_document]]` are dropped. A Hermes Desktop directive reads the same way (plugin 0.120.4+): a page shown with `::preview{file="…"}` as its file, and a Desktop plugin's card, such as hermes-rich-ui's `::richui{id="…"}`, as `🗂 hermes-rich-ui card`. Code in a reply's fenced block stays as written.
 
 ### Cron runs (plugin 0.33+)
@@ -155,7 +157,7 @@ The plugin tells a cron run by its task id (`cron:<job id>:…`) or its classic 
 
 ### Cron jobs delivered to a Bot Chat
 
-Hermes delivers a job set to `deliver: bot-chat` (or `bot-chat:<profile>`) as a turn: the bot reads the report, acts on what needs action and summarizes it, a model call every run. With the plugin, such a job **just shows its report** in that bot's Bot Chat instead: it's written into the chat as a note, the way Hermes writes a cron result into a local chat, with no turn and no model call, and the bot sees it as context on its next turn. Pick **Let the bot act on it** for a job in Conduit's job editor to keep Hermes' turn for it. The choice is kept in the job's profile's `conduit-cron.json` beside the muted jobs: `GET /api/plugins/conduit_push/cron/notifications` lists the jobs that let the bot act under `act`, and `PUT` with `{"job_id": "...", "act": true}` changes one. Capability `cron-bot-chat-reports`; the route's `shows_reports` says whether this Hermes can write the note (Hermes v0.22.5 can't, its canary from late October can), and without it every job keeps Hermes' turn and Conduit offers no choice. A report shows only in a Bot Chat that exists.
+Hermes delivers a job set to `deliver: bot-chat` (or `bot-chat:<profile>`) as a turn: the bot reads the report, acts on what needs action and summarizes it, a model call every run. With the plugin, such a job **just shows its report** in that bot's Bot Chat instead: it's written into the chat as a note, the way Hermes writes a cron result into a local chat, with no turn and no model call, and the bot sees it as context on its next turn. Pick **Let the bot act on it** for a job in Conduit's job editor to keep Hermes' turn for it. The choice is kept in the job's profile's `conduit-cron.json` beside the muted jobs: `GET /api/plugins/conduit_push/cron/notifications` lists the jobs that let the bot act under `act`, and `PUT` with `{"job_id": "...", "act": true}` changes one. Capability `cron-bot-chat-reports`; the route's `shows_reports` says whether this Hermes can write the note (Hermes v0.22.5 can't, its canary from late October can), and without it every job keeps Hermes' turn and Conduit offers no choice. A report shows only in a Bot Chat that exists. A picture or file the report delivers on a line of its own (`MEDIA:/path`) is written as `@image:/path` or `@file:/path`, which Hermes Desktop and Conduit show in a note as the picture or the file, and the Artifacts list shows as the run's deliveries; a tag inside a sentence or in a code block stays as written.
 
 Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-032)).
 
@@ -271,7 +273,8 @@ text), at most 2,000 lines of at most 160 characters, each only letters,
 digits, spaces and `()._,:;+=<>/#%[]-`. A user who sees a chat jump or stop
 responding sends the trace on its own from Settings > Connection >
 Diagnostics & logs (kind `chat`), and the trace says what saved it: `jump`,
-`stall`, `storm`, `rebuild` or `manual`. The relay answers a post whose trace it kept with `"trace": true`, so the app deletes its copy only then. A post holds at most 1,000,000
+`stall`, `storm`, `rebuild`, `blank` (rows on screen that no cell drew, relay 0.27+) or
+`manual`. The relay answers a post whose trace it kept with `"trace": true`, so the app deletes its copy only then. A post holds at most 1,000,000
 characters, and the relay keeps only the diagnostic keys it names
 (metadata codes, exception type and name, stack frames, 512 levels of a
 stack), at most 600,000 bytes of them, with the trace, so the folder stays under about 1 GB. The relay keeps each as a file under
@@ -1157,6 +1160,13 @@ bridge alike:
 - Each finished transcription (`conversation.item.input_audio_transcription.completed`)
   starts the call's turn, as the model address would. The readiness check's
   marker and a typed turn do too, so neither is read aloud.
+- In agent mode (below) the call's fast model answers that turn instead of
+  Hermes, exactly as on the model address: its words are read back the same
+  way, its tool calls go to Conduit, and talking over it stops it. The
+  readiness check stays Conduit's own turn, and with no fast model set, or
+  one that fails before saying anything, the words go to Hermes after the
+  "isn't answering" line (plugin 0.151.0). The Watch's bridge has no agent
+  mode, so it keeps one Hermes turn per utterance.
 - The reply, as it streams, goes back in sentences, one read-back
   `response.create` (inline input) per sentence, one at a time. The first
   sentence goes as soon as it ends; later ones join until they're 40
@@ -1238,6 +1248,9 @@ How a call runs:
 - The readiness check is still answered by Conduit. With no fast model set,
   or with one that fails before saying anything, the utterance goes to
   Hermes as a turn instead.
+- On a read-back speech server (above), which never asks for replies
+  itself, the plugin asks the fast model for each transcription on the
+  relay, with the same tools, history and fallback (plugin 0.151.0).
 
 An engine that runs its own fast model (Pipecat behind the relay, say) uses
 the same tools with the Local Live key:
@@ -1435,11 +1448,12 @@ question or a small task doesn't start a workstream. Change it in Conduit
     hermes -p <bot> conduit-push work on --policy strict    # she only coordinates
     hermes -p <bot> conduit-push work on --after-restart ask  # after a restart, ask before continuing
     hermes -p <bot> conduit-push work on --approvals ask    # workstreams ask before what can't be undone
+    hermes -p <bot> conduit-push work on --coordination auto   # she keeps her workstreams in step on her own
     hermes -p <bot> conduit-push work on --model anthropic:claude-sonnet-5-5   # new workstreams' model (bot: her own)
     hermes -p <bot> conduit-push work status
 
 - The Bot Chat gets `work_list`, `work_start`, `work_send`, `work_stop`,
-  `work_read`, `work_close`, `work_note`, `work_ask` and `work_reply` (behind
+  `work_read`, `work_close`, `work_note`, `work_propose`, `work_ask` and `work_reply` (behind
   Hermes' Tool Search). They answer in that bot's canonical Bot Chat, and
   name work by ref (W1, W2 for workstreams, A1, A2 for asks), never by session
   id, so a bot only ever reaches its own work.
@@ -1459,6 +1473,17 @@ question or a small task doesn't start a workstream. Change it in Conduit
   another found or made without the coordinator passing it on. It can't send
   to, stop or start work; if it needs another workstream to do something, it
   says so in its report.
+- The Bot Chat's note says what each open workstream covers: its task in a
+  few words, the folder it works in, and the files its instructions name or
+  it reported changing. `work_start` holds a new task against that before it
+  starts anything: a title that is nearly the same (work that is
+  running, or of the last ten minutes), a file both name (not when the two
+  are known to be in different repositories or folders), or tasks that share most of their words (work
+  that is running or settled in the last six hours). A match is refused with
+  the workstreams and why (`similar_work`), so the Bot Chat sends the work
+  there with `work_send`; `new: true` starts it anyway.
+- `work_progress` takes a step's state as done, doing or todo, and reads
+  what models write for them (pending, in_progress, completed).
 - `work_start` with `cwd` records the git repository that folder is in. When
   other running work is in the same repository, the coordinator is told and
   the new workstream's brief names them, so it leaves their changes alone.
@@ -1538,6 +1563,53 @@ question or a small task doesn't start a workstream. Change it in Conduit
   plugin turned it off in, so a turn you start there yourself asks too. A
   resolved workstream, or a change made with `--approvals`, turns back at
   its next turn through Conduit.
+- The Bot Chat keeps its workstreams working together (plugin 0.154+). The
+  plugin keeps a ledger of what happens in each one, with who said it: what
+  a worker reports with `work_progress` (`found`, `assumes`, `changed`), what
+  you write in a workstream's own chat, how each turn ended, and what the Bot
+  Chat sent and whether it arrived. Each of her turns gets that as a board in
+  her note, so when W2 finds something that breaks what W1 relies on, she can
+  act before you tell her. A work update she has nothing to tell you about
+  she answers with `[SILENT]`, and you see nothing. Coordination (Edit Bot >
+  Work, or `--coordination`) sets how independently she acts in the turns
+  she starts herself, a work update's: `ask` (the default) lets her pass
+  information on and ask a workstream to check something, and has her ask
+  you before she starts, stops or redirects work (the plugin refuses those
+  in such a turn, and adds her words to a running turn without
+  interrupting it); `auto` lets her do those on her own and tell you in a
+  line; `off` is the Bot Chat as it was, passing reports on. When you write
+  to her, she acts on your message under any setting. What she asks you and
+  what you answer is kept with `work_propose`, so she doesn't ask twice:
+  while a question about a workstream is open, the plugin refuses another
+  about it (she can reword the open one with new evidence), a no stands for a
+  day unless she tells you what came up since, and one decision that covers
+  several workstreams is one question, your answer covering each (plugin
+  0.158.0+). A
+  workstream you set to Leave alone (its card in Conduit) gets nothing from
+  her and isn't stopped by her in a turn you didn't start. Past eight
+  messages to one workstream in an hour from such turns, the next is refused
+  and she tells you. None of this changes what Hermes lets a workstream's
+  tools do: approvals, dangerous-command rules and `/yolo` stay as you set
+  them.
+- While workstreams work, a helper model reads what they report (plugin
+  0.155+). A work update only comes when a turn ends; in between, each new
+  line in the ledger (a worker's `found`, `assumes` or `changed`, or what you
+  wrote in a workstream's chat) is read against the bot's other open work,
+  and when it could matter to another workstream the Bot Chat is told in a
+  work update while the first is still running. The helper only points: it
+  never messages a workstream, and what the Bot Chat does about it follows
+  your Coordination setting. It is one of Hermes' helper models ("Conduit
+  work watch" under Models, or Watch Model under Coordination in Conduit's
+  Edit Bot > Work), the bot's own model until you pick another; a small
+  fast one is enough. It reads only when a bot has more than one
+  open workstream and Coordination isn't off, and may start twelve such
+  turns an hour; past that a flag is kept on the board and her next turn
+  says so. Conduit's Work panel lists what she did to keep the work in step
+  over the last day (what the helper flagged, what she sent on her own and
+  whether it arrived, what she asked you), each with the lines behind it.
+  `hermes -p <bot> conduit-push work status` prints the day's counts: reads
+  and their tokens, flags, work update turns, and messages with how far
+  each got.
 - What the Bot Chat does itself is decided by how long the work runs, not by
   which tool it uses. Under every setting it keeps its own tools: the work
   tools, `memory` and the memory provider's, and what shows you something or
@@ -1548,7 +1620,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   and code prompts (`browser_vault`). Strict ("Only Coordinates") leaves it
   only those. Lookups ("Quick Things Here") also runs any other tool, reads
   and changes alike, under the bot's usual approvals, for 5 steps of a turn
-  or a minute after the turn's first; the step after that is refused with a
+  or a minute after the turn's first (the user can pick 10 or 20 steps per
+  bot, `quick_steps`, with 12 seconds for each); the step after that is refused with a
   note to start a workstream with what it found so far, and `delegate_task`
   always goes to a workstream. Open ("Everything Here") runs everything in
   the Bot Chat and starts workstreams when it judges the work long or you ask.
@@ -1599,7 +1672,8 @@ question or a small task doesn't start a workstream. Change it in Conduit
   question rather than waiting behind it. Only a Bot Chat turn your own
   message started, written after the question came, passes one on, so the bot never answers it alone, and
   what a group room says never does.
-- Up to 2 run at once per bot (`--max-running`). The registry is
+- Up to 4 run at once per bot by default (plugin 0.157.9+; 2 before), 1 to 6
+  in Edit Bot > Work or with `--max-running`; a bot with a saved number keeps it. The registry is
   `<profile>/conduit/workstreams.db`, with a journal of each workstream's
   tool steps and an outbox of every turn sent into a chat.
 - After a restart, a clean one or a crash, work that was running is marked
@@ -1637,8 +1711,8 @@ its next digest. A secondary bot is named with `?conduit_profile=`.
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/stop`, `/continue` or `/check` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/pin`, `/unpin`, `/resolve` or `/reopen` | `{ok, work}` |
 | POST | `/api/plugins/conduit_push/workstreams/<ref>/approve` or `/deny` with `{request_id}` | `{ok, work}` |
-| GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, policies, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, workstream_model, unavailable}` (`policy`: off, strict, lookups or open; `policies`: the ones this plugin takes) |
-| POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, max_running, after_restart, workstream_approvals, workstream_model}` | the settings as they are now |
+| GET | `/api/plugins/conduit_push/workstreams/settings` | `{ok, policy, policies, quick_steps, quick_steps_choices, coordination, coordinations, max_running, max_running_limit, after_restart, workstream_approvals, chat_approvals, workstream_model, unavailable}` (`policy`: off, strict, lookups or open; `policies`: the ones this plugin takes; `quick_steps`: the steps a lookups turn does in the Bot Chat) |
+| POST | `/api/plugins/conduit_push/workstreams/settings` with any of `{policy, quick_steps, coordination, max_running, after_restart, workstream_approvals, workstream_model}` | the settings as they are now |
 | POST | `/api/plugins/conduit_push/workstreams/adopt` with `{session_id, title, via, goal?, chat?, result?}` (`via`: `phone` or `watch`; `result`: the reply of a turn that ended before the phone kept it, which settles the row; `chat`: the chat the call is kept with, so the Bot Chat's makes it the coordinator's workstream, `call` on its row; `call`: the call's own id) | `{ok, ref, adopted, work}`; the same call's session again answers with its row, `adopted` false; `taken` (409) for one of the bot's own workstreams' sessions; `invalid` (400) when `session_id`, `title`, `goal`, `chat` or `result` isn't text; `off` (409) when the bot's workstreams are off |
 | POST | `/api/plugins/conduit_push/workstreams/call-ended` with `{chat, call?}` (a call kept with that chat ended, in any voice mode) | `{ok, bot_chat}`; `bot_chat` is true when the chat is the Bot Chat, whose held updates go 15 s later when the hold is this call's (`call`, the id its adopts named); 400 without `chat` |
 
@@ -1902,15 +1976,18 @@ details only the user can give go in one clarify call with open questions,
 which Conduit shows as a form they may leave partly blank (0.82+). A spoken
 message adds that the answer is heard: Hermes says it in words, not with
 `text_to_speech` or a sound file of its own, which a voice would read out as
-a file path; a file the user asks for still goes (0.115.1+).
+a file path; a file the user asks for still goes (0.115.1+). A typed message
+whose reply Conduit's Read replies aloud setting reads out adds the same
+about sound files, since the answer is heard as well as read (0.156.0+).
 
 - `POST /api/plugins/conduit_push/turn-surface` with
   `{"session_id": "<runtime session id>", "text_sha256": "<hex>", "surface": "carplay", "input": "spoken"}`
   answers `{"ok": true, "recorded": true}`. `text_sha256` is the SHA-256 of
   the UTF-8 text Conduit sends in `prompt.submit`. Surfaces: `iphone`,
   `ipad`, `mac`, `vision`, `watch`, `carplay`, `siri`; `input` is `typed`
-  or `spoken`, or left out when unknown (a Shortcut). Capability
-  `turn-surface`.
+  or `spoken`, or left out when unknown (a Shortcut). `"heard": true` on a
+  typed message says Conduit will read its reply aloud (0.156.0+; a plugin
+  before it ignores the key). Capability `turn-surface`.
 - The report is kept on Hermes' in-memory record of that chat (up to 8, for
   15 minutes) and taken by the turn whose message has that hash, when the
   turn came from Conduit's socket. A message that steered or redirected a
@@ -2080,7 +2157,9 @@ added (Hindsight) then spent dollars a day on the Pulse chat alone
 from the provider: for a Pulse turn there's no save, no recall and no turn
 count, and the chat's end and its compaction hand the provider the chat with
 Pulse's turns (each ask and its reply) left out. What you write in the Pulse
-chat yourself is saved and recalled as in any chat. A turn counts as Pulse's
+chat yourself is saved and recalled as in any chat, and the turn after a
+Pulse turn doesn't hand the provider Pulse's ask as your last message
+(plugin 0.153.4+, notifier #652). A turn counts as Pulse's
 when it holds the whole text Pulse sent from this profile (its store,
 `conduit-pulse.db`, says), so quoting a Pulse tag doesn't make your message
 Pulse's. If that store can't be read, the turn goes to the provider as
@@ -2325,6 +2404,12 @@ and the dashboard routes under one file lock, so they survive restarts:
 - **Presence (0.14+):** while you're in a Live Voice call, Conduit holds
   presence (`hold_s` up to 600, renewed during the call, 0 at hang-up).
   Nothing rings meanwhile: a call that would go out sends the usual push.
+  An Apple Watch call holds it too (0.158.2+): the host renews 90 seconds
+  every 30 while it relays the call's audio (GPT-Live, Grok, Local Live),
+  keeps it through a rejoin or a provider's drop, and lets go when the
+  Watch hangs up (after a drop too), the call fails on the host, a rejoin
+  is refused, or the grant ends. Two Watch calls on one profile share it:
+  it goes only when the last one ends (0.158.3+).
 - **Declined and missed calls (0.15+):** when you decline a call, or it
   rings out, reaches a phone that was offline or is silenced by Do Not
   Disturb, Conduit reports it here with the call's id, session ids, kind,
@@ -2376,7 +2461,10 @@ with a `reason` (one spoken sentence, up to 200 characters) and
   Voice.
 - `asked_by_user: true` needs "call when I ask"; `false` needs "Hermes
   decides". Either way the limits apply, presence holds it, and a session
-  already watched keeps one watch (it takes the reason).
+  already watched keeps one watch (it takes the reason). While presence
+  holds (0.158.2+), the tool answers `in_call` at once and sets nothing up,
+  so Hermes doesn't promise a ring that won't come; a call for later, once
+  something finishes, is still set up with `conduit_call_watch`.
 - **What's worth a call (0.16+):** with `rules` written (the user's own
   words, such as "only if production is down"), a call Hermes decides on
   first answers `check_rules` with them. It goes only when Hermes calls again
@@ -2629,9 +2717,10 @@ keep only that field.
 - **Only where they're drawn.** A Conduit says `info-cards` in its
   exchange's `features` when it draws them. Unless every Conduit that
   draws cards (`show-cards` or `chat-cards`) and exchanged with the profile
-  in the last 3 days says it (30 days before plugin 0.130), the tool leaves them out (`unsupported_cards`
-  when nothing else is left): the chat keeps the cards, and an older build
-  opening it would show them as nothing. Each phone's exchange
+  in the last 3 days on the newest Conduit build among them says it (30 days
+  before plugin 0.130; every build before 0.152), the tool leaves them out
+  (`unsupported_cards` when nothing else is left). An older build that
+  opens the chat shows those cards as nothing until it updates. Each phone's exchange
   also leaves out the cards it can't draw and shows the Markdown instead.
 
 ### Media, contact and live cards (plugin 0.47+)
@@ -3253,8 +3342,35 @@ whether notes and attendees are included (off by default).
   edits made in Contacts arrive, and Conduit flags a person it can't read
   while the host keeps their last copy.
 
-Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms and
-200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
+- **Contact changes (plugin 0.160+).** When the user also lets Hermes change
+  contacts, `conduit_contacts` gains `add` (a new contact, who joins the
+  picked people), `update` (a picked person's card, by `contact_id`; `phones`
+  and `emails` replace the lists whole) and `delete`. Each is a pending change
+  the phone always asks about, never added without asking.
+
+- **Photos (plugin 0.161+).** When the user shares their photos, Conduit
+  describes each one on the phone (Apple's on-device labels, text found in
+  it, the town or area, when, favorite or screenshot) and sends only that,
+  for the newest 5,000. `conduit_photos` gains `search` (words, `from`/`to`,
+  `favorites`) and `send` (`photo_id`): a pending change that always asks,
+  showing the picture on a card. Only once the user says yes does the phone
+  upload it (a JPEG in the next `/phone/ingest` batch), and `pending` gives
+  the change's `result` as the picture's path on the host, for
+  `vision_analyze` or a `MEDIA:` tag. Sent pictures are kept 7 days.
+
+- **Shortcuts (plugin 0.159+).** When the user lets Hermes run Shortcuts, they
+  list the ones it may run in Conduit, by name, each with what it's for in
+  their words. `conduit_phone` gains `shortcuts` (that list) and
+  `run_shortcut` (`shortcut` by name, optional `input` text), a pending
+  change like an alarm that waits an hour at most. iOS only lets an app start
+  a shortcut by opening the Shortcuts app, so the phone runs it when Conduit
+  is on screen: the user approves the card (or says yes in a voice call), or
+  it runs as soon as they open Conduit when they let Hermes run Shortcuts
+  without asking; the notification always alerts. The text the shortcut
+  gives back comes with the outcome, as `result` in `pending`.
+
+Limits: 4 devices per profile, 5,000 items and 4 MiB per batch, 50 alarms,
+50 Shortcuts and 200 contacts per device, 120 uploads and 60 exchanges a minute per profile,
 64 KiB per exchange.
 
 ## Pulse looks things up first (plugin 0.96+)
@@ -3587,8 +3703,11 @@ keeps it.
 - **Cards as picks** (plugin 0.150+). Every report, look ahead and
   follow-up card is a checked pick: a headline, at most one more sentence,
   a shape with its facts (`date`, `due`, `runs`, `promise`, `status`,
-  `steps`, `drawn` for a Conduit card body, or `plain`) and at most two
-  actions (`ask` with words for the chat's composer, `open` with a link,
+  `steps`, `drawn` for a Conduit card body, or `plain`; from 0.162, once
+  every Conduit you use says `pulse-more-shapes`, also `number` for a value
+  that changed, `waiting` for someone who owes you a reply or a thing, and
+  `found` for what something you asked Pulse to watch for turned up) and at
+  most two actions (`ask` with words for the chat's composer, `open` with a link,
   `draft` with a message, `done`, `later`). Facts that don't hold up draw
   plain. Each pick names its subject (a remembered item, reminder, calendar
   entry or scheduled job) and its incident: a new card, an update to an open

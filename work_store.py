@@ -15,6 +15,11 @@ Three tables beside ``work``: ``steps`` journals every tool call a workstream
 starts and ends (what a restart reads to tell safe work from uncertain work),
 ``outbox`` keeps every turn the broker sends until Hermes takes it, and
 ``meta`` the bot's settings and ref counters.
+
+Two more for coordination (work_coord): ``events`` is the ledger of what
+happened in each workstream, each row with who said it and where it was read
+from, and ``proposals`` what the Bot Chat asked the user and what they
+answered.
 """
 
 from __future__ import annotations
@@ -45,7 +50,13 @@ POLICIES = ("off", "strict", "lookups", "open")
 # 2026-11-03): a quick ask answered in the Bot Chat beats a workstream
 # started for it; strict and open stay choices in Edit Bot > Work.
 DEFAULT_POLICY = "lookups"
-DEFAULT_MAX_RUNNING = 2
+# Four at once (Eric 2026-11-10, raised from 2 after six ran cleanly in the
+# two-hour coordination run); a bot with a saved number keeps it.
+DEFAULT_MAX_RUNNING = 4
+# How many steps a Quick Things Here turn does in the Bot Chat before the
+# rest goes to a workstream (Eric 2026-11-10: "can that number be
+# configurable?"). The first is the default.
+QUICK_STEPS = (5, 10, 20)
 # What a restart does with a workstream it stopped that had nothing
 # uncertain in flight (C.7): continue it once, or only tell the coordinator.
 AFTER_RESTART = ("continue", "ask")
@@ -54,6 +65,14 @@ DEFAULT_AFTER_RESTART = "continue"
 # "chats" follows the bot's approval mode in Hermes, "ask" holds them to the
 # user's own words whatever Hermes does, "off" lets them run without asking.
 WORKSTREAM_APPROVALS = ("chats", "ask", "off")
+# How independently the Bot Chat keeps its workstreams working together in
+# the turns it starts itself (work_coord; Eric 2026-11-10): "off" is a Bot
+# Chat that only passes reports on, "ask" asks the user before it starts,
+# stops or redirects work, "auto" does those on its own.
+COORDINATION = ("off", "ask", "auto")
+DEFAULT_COORDINATION = "ask"
+EVENT_CHARS = 600
+EVENTS_KEEP_S = 14 * 24 * 3600.0
 DEFAULT_WORKSTREAM_APPROVALS = "chats"
 # What Edit Bot > Work's Workstream Model keeps; Hermes' session.create takes the same names.
 WORKSTREAM_MODEL_KEYS = ("model", "provider", "reasoning_effort")
@@ -136,13 +155,42 @@ CREATE TABLE IF NOT EXISTS outbox (
     accepted_at REAL NOT NULL DEFAULT 0,
     outcome TEXT NOT NULL DEFAULT ''
 );
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ref TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    who TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '',
+    detail TEXT NOT NULL DEFAULT '',
+    at REAL NOT NULL,
+    key TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS events_ref ON events (ref, id);
+CREATE UNIQUE INDEX IF NOT EXISTS events_key ON events (key) WHERE key != '';
+CREATE TABLE IF NOT EXISTS proposals (
+    id TEXT PRIMARY KEY,
+    ref TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    answer TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    answered_at REAL NOT NULL DEFAULT 0
+);
 """
 
 _JSON_FIELDS = ("requested_by", "executor", "reply_to", "progress")
 # Columns added after a registry's first version: (name, definition).
 _ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL NOT NULL DEFAULT 0"),
                   ("pinned_at", "REAL NOT NULL DEFAULT 0"), ("resolved_by", "TEXT NOT NULL DEFAULT ''"),
-                  ("reopened_at", "REAL NOT NULL DEFAULT 0"))
+                  ("reopened_at", "REAL NOT NULL DEFAULT 0"), ("left_alone_at", "REAL NOT NULL DEFAULT 0"))
+# The same for the outbox: when a send showed in its target's saved messages,
+# and whether a turn the Bot Chat started itself sent it (work_coord).
+_ADDED_OUTBOX_COLUMNS = (("delivered_at", "REAL NOT NULL DEFAULT 0"), ("own", "INTEGER NOT NULL DEFAULT 0"))
+# A question about several workstreams names the rest in ``also`` (space
+# apart), ``ref`` keeping the first for older apps; ``new`` is what a
+# question asked again after a decline says came up since (Eric 2026-11-10).
+_ADDED_PROPOSAL_COLUMNS = (("also", "TEXT NOT NULL DEFAULT ''"), ("new", "TEXT NOT NULL DEFAULT ''"))
 # Who can start a job of their own that's kept here too (M5): a call's
 # job runs as the call says, never under the coordinator's limit.
 CALL_VIA = ("phone", "watch")
@@ -188,6 +236,9 @@ class Work:
     resolved_by: str = ""
     # When the user last reopened it from the Work panel's Resolved list.
     reopened_at: float = 0.0
+    # The user set it to Leave alone (0: not): the Bot Chat sends it nothing
+    # and doesn't stop it in a turn the user didn't start.
+    left_alone_at: float = 0.0
 
     @property
     def active(self) -> bool:
@@ -287,6 +338,18 @@ class Store:
     def set_max_running(self, value: int) -> None:
         self.set_meta("max_running", str(min(max(int(value), 1), MAX_RUNNING_LIMIT)))
 
+    def quick_steps(self) -> int:
+        try:
+            value = int(self.get_meta("quick_steps", str(QUICK_STEPS[0])))
+        except ValueError:
+            return QUICK_STEPS[0]
+        return value if value in QUICK_STEPS else QUICK_STEPS[0]
+
+    def set_quick_steps(self, value: int) -> None:
+        if value not in QUICK_STEPS:
+            raise ValueError(f"quick_steps must be one of {', '.join(str(n) for n in QUICK_STEPS)}")
+        self.set_meta("quick_steps", str(value))
+
     def after_restart(self) -> str:
         value = self.get_meta("after_restart", DEFAULT_AFTER_RESTART)
         return value if value in AFTER_RESTART else DEFAULT_AFTER_RESTART
@@ -304,6 +367,15 @@ class Store:
         if value not in WORKSTREAM_APPROVALS:
             raise ValueError(f"workstream_approvals must be one of {', '.join(WORKSTREAM_APPROVALS)}")
         self.set_meta("workstream_approvals", value)
+
+    def coordination(self) -> str:
+        value = self.get_meta("coordination", DEFAULT_COORDINATION)
+        return value if value in COORDINATION else DEFAULT_COORDINATION
+
+    def set_coordination(self, value: str) -> None:
+        if value not in COORDINATION:
+            raise ValueError(f"unknown coordination {value}")
+        self.set_meta("coordination", value)
 
     def workstream_model(self) -> dict:
         """The model new workstreams start on (``model``, and ``provider``
@@ -511,7 +583,7 @@ class Store:
         The row as written, or None when nothing was (no row, or not in
         those states)."""
         allowed = {"session_id", "status", "last_result", "error", "title", "goal", "cwd", "repo", "seen_at",
-                   "closed_at", "turn_at", "pinned_at", "resolved_by", "reopened_at", *_JSON_FIELDS}
+                   "closed_at", "turn_at", "pinned_at", "resolved_by", "reopened_at", "left_alone_at", *_JSON_FIELDS}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown fields {sorted(unknown)}")
@@ -524,7 +596,7 @@ class Store:
         values = {key: (json.dumps(value) if key in _JSON_FIELDS else value) for key, value in fields.items()}
         # Seen marks, a worker's checklist and the user's pin aren't changes
         # the coordinator's "new since your last turn" is about.
-        if set(fields) - {"seen_at", "progress", "turn_at", "pinned_at"}:
+        if set(fields) - {"seen_at", "progress", "turn_at", "pinned_at", "left_alone_at"}:
             values["updated_at"] = time.time()
         if not values:
             return self.get(ref)
@@ -622,14 +694,169 @@ class Store:
 
     # The outbox
 
-    def outbox_add(self, ref: str, kind: str, target: str, text: str) -> str:
+    def outbox_add(self, ref: str, kind: str, target: str, text: str, own: bool = False) -> str:
         """Written before Hermes is asked, so a send a restart cut off can be
-        found and checked against the target's transcript."""
+        found and checked against the target's transcript. ``own``: sent
+        from a turn the Bot Chat started itself."""
         item = f"out-{uuid.uuid4().hex[:16]}"
         with self._db() as con:
-            con.execute("INSERT INTO outbox (id, ref, kind, target, text, created_at) VALUES (?, ?, ?, ?, ?, ?)",
-                        (item, ref, kind, target, text, time.time()))
+            con.execute("INSERT INTO outbox (id, ref, kind, target, text, created_at, own) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (item, ref, kind, target, text, time.time(), 1 if own else 0))
         return item
+
+    def outbox_delivered(self, item: str) -> None:
+        """The send showed in its target's saved messages."""
+        with self._db() as con:
+            con.execute("UPDATE outbox SET delivered_at = ? WHERE id = ? AND delivered_at = 0", (time.time(), item))
+
+    def outbox_undelivered(self, ref: str, since: float) -> list[dict]:
+        """The sends Hermes took that haven't shown in the workstream's
+        saved messages yet."""
+        return self._read("SELECT * FROM outbox WHERE ref = ? AND kind IN ('send', 'answer', 'user_send') AND "
+                          "accepted_at > 0 AND delivered_at = 0 AND created_at >= ? ORDER BY created_at",
+                          (ref, since))
+
+    def outbox_states(self, ref: str) -> dict[str, dict]:
+        """Each send to the workstream by its id: its outcome and when it
+        was delivered."""
+        rows = self._read("SELECT id, outcome, accepted_at, delivered_at FROM outbox WHERE ref = ? AND kind = 'send' "
+                          "ORDER BY created_at DESC LIMIT 50", (ref,))
+        return {row["id"]: row for row in rows}
+
+    def outbox_states_of(self, ids: list[str]) -> dict[str, dict]:
+        """The same for the sends with these ids, however many came since."""
+        ids = [item for item in dict.fromkeys(ids) if item][:500]
+        if not ids:
+            return {}
+        rows = self._read("SELECT id, outcome, accepted_at, delivered_at FROM outbox WHERE kind = 'send' AND id IN "
+                          f"({', '.join('?' for _ in ids)})", tuple(ids))
+        return {row["id"]: row for row in rows}
+
+    def own_sends_since(self, ref: str, since: float) -> int:
+        rows = self._read("SELECT COUNT(*) AS n FROM outbox WHERE ref = ? AND kind = 'send' AND own = 1 AND "
+                          "accepted_at > 0 AND created_at >= ?", (ref, since))
+        return int(rows[0]["n"]) if rows else 0
+
+    def _read(self, query: str, args: tuple = ()) -> list[dict]:
+        """A read that finds nothing in a registry written before its table
+        or column was added (the next write adds them)."""
+        if not self.path.is_file():
+            return []
+        try:
+            with self._db(write=False) as con:
+                return [dict(row) for row in con.execute(query, args).fetchall()]
+        except sqlite3.OperationalError:
+            return []
+
+    # The ledger (work_coord)
+
+    def event_add(self, ref: str, kind: str, who: str, text: str, *, source: str = "", key: str = "",
+                  detail: str = "", at: Optional[float] = None) -> bool:
+        """One thing that happened in a workstream: what (``kind``), who
+        said it (worker, user, coordinator or plugin) and where it was read
+        from (``source``: a session, a saved message, an outbox row).
+        ``key`` names it, so the same thing read twice is kept once: False
+        then. Rows older than EVENTS_KEEP_S go as new ones come."""
+        now = time.time()
+        with self._db() as con:
+            if key and con.execute("SELECT 1 FROM events WHERE key = ?", (key,)).fetchone():
+                return False
+            con.execute("INSERT INTO events (ref, kind, who, source, text, detail, at, key) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (ref, kind, who, source, _clip(text, EVENT_CHARS), _clip(detail, STEP_SUMMARY_CHARS),
+                         now if at is None else at, key))
+            con.execute("DELETE FROM events WHERE at < ?", (now - EVENTS_KEEP_S,))
+        return True
+
+    def events(self, ref: str, *, since: float = 0.0, kinds: Optional[tuple[str, ...]] = None,
+               limit: int = 50) -> list[dict]:
+        """A workstream's newest events, oldest first."""
+        where, args = "ref = ? AND at >= ?", [ref, since]
+        if kinds:
+            where += f" AND kind IN ({', '.join('?' for _ in kinds)})"
+            args.extend(kinds)
+        rows = self._read(f"SELECT * FROM events WHERE {where} ORDER BY id DESC LIMIT ?", (*args, limit))
+        return list(reversed(rows))
+
+    def ledger(self, *, after_id: int = 0, since: float = 0.0, kinds: Optional[tuple[str, ...]] = None,
+               limit: int = 50, oldest: bool = False) -> list[dict]:
+        """The newest events of every workstream of the bot (with ``oldest``
+        the first of them, for a reader working through them), oldest first:
+        those after an event (``after_id``) or a time (``since``)."""
+        where, args = "id > ? AND at >= ?", [after_id, since]
+        if kinds:
+            where += f" AND kind IN ({', '.join('?' for _ in kinds)})"
+            args.extend(kinds)
+        order = "ASC" if oldest else "DESC"
+        rows = self._read(f"SELECT * FROM events WHERE {where} ORDER BY id {order} LIMIT ?", (*args, limit))
+        return rows if oldest else list(reversed(rows))
+
+    def sends_since(self, since: float, *, kind: str = "send") -> list[dict]:
+        """The outbox rows of one kind written since then, oldest first."""
+        return self._read("SELECT * FROM outbox WHERE kind = ? AND created_at >= ? ORDER BY created_at", (kind, since))
+
+    # What the Bot Chat asked the user (work_propose)
+
+    def proposal_add(self, refs: Any, text: str, new: str = "") -> str:
+        """A question the Bot Chat asked the user, about the workstreams in
+        ``refs`` (one ref, or a list; the first is ``ref``)."""
+        refs = [refs] if isinstance(refs, str) else list(refs or ())
+        with self._db() as con:
+            row = con.execute("SELECT value FROM meta WHERE key = 'next_P'").fetchone()
+            number = int(row["value"]) if row else 1
+            con.execute("INSERT INTO meta (key, value) VALUES ('next_P', ?) ON CONFLICT(key) DO UPDATE SET value = ?",
+                        (str(number + 1), str(number + 1)))
+            con.execute("INSERT INTO proposals (id, ref, also, text, new, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                        (f"P{number}", refs[0] if refs else "", " ".join(refs[1:]), text, new, time.time()))
+        return f"P{number}"
+
+    def proposal_reword(self, item: str, refs: list[str], text: str, new: Optional[str] = None) -> Optional[dict]:
+        """An open question asked again with new wording (and evidence),
+        about ``refs`` (the caller adds them to the ones it had), keeping
+        its workstreams when none are given and its ``new`` when that is
+        None ("" clears it); None when it isn't open."""
+        with self._db() as con:
+            changed = con.execute("UPDATE proposals SET ref = CASE WHEN ? THEN ? ELSE ref END, "
+                                  "also = CASE WHEN ? THEN ? ELSE also END, text = ?, "
+                                  "new = CASE WHEN ? THEN ? ELSE new END WHERE id = ? AND status = 'open'",
+                                  (bool(refs), refs[0] if refs else "", bool(refs), " ".join(refs[1:]), text,
+                                   new is not None, new or "", item)).rowcount
+            row = con.execute("SELECT * FROM proposals WHERE id = ?", (item,)).fetchone() if changed else None
+        return dict(row) if row else None
+
+    def proposal(self, item: str) -> Optional[dict]:
+        """One question by its id, answered or not."""
+        if not self.path.is_file():
+            return None
+        rows = self._read("SELECT * FROM proposals WHERE id = ?", (item,))
+        return rows[0] if rows else None
+
+    def proposal_about(self, refs: list[str], *, status: str, since: float = 0.0,
+                       besides: str = "") -> Optional[dict]:
+        """The newest question in ``status`` about any of ``refs``, other than
+        ``besides``: open ones whenever asked, answered ones answered since
+        then."""
+        if not refs or not self.path.is_file():
+            return None
+        rows = self._read("SELECT * FROM proposals WHERE status = ? AND (status = 'open' OR answered_at >= ?) "
+                          "AND id != ? ORDER BY created_at DESC", (status, since, besides))
+        wanted = set(refs)
+        return next((row for row in rows if wanted & set(proposal_refs(row))), None)
+
+    def proposal_answer(self, item: str, status: str, answer: str = "") -> Optional[dict]:
+        """The user's answer to an open proposal; None when it isn't open."""
+        if status not in ("approved", "declined"):
+            raise ValueError(f"unknown answer {status}")
+        with self._db() as con:
+            changed = con.execute("UPDATE proposals SET status = ?, answer = ?, answered_at = ? WHERE id = ? AND "
+                                  "status = 'open'", (status, answer, time.time(), item)).rowcount
+            row = con.execute("SELECT * FROM proposals WHERE id = ?", (item,)).fetchone() if changed else None
+        return dict(row) if row else None
+
+    def proposals(self, *, since: float = 0.0, limit: int = 20) -> list[dict]:
+        """The open ones, and those answered since then, oldest first."""
+        rows = self._read("SELECT * FROM proposals WHERE status = 'open' OR answered_at >= ? "
+                          "ORDER BY status = 'open' DESC, created_at DESC LIMIT ?", (since, limit))
+        return sorted(rows, key=lambda row: row["created_at"])
 
     def outbox_done(self, item: str, outcome: str) -> None:
         with self._db() as con:
@@ -656,10 +883,17 @@ class Store:
 def _add_columns(con: sqlite3.Connection) -> None:
     """A registry from before a column was added gets it (a write opens the
     file this way first, so reads after any write see it)."""
-    have = {row[1] for row in con.execute("PRAGMA table_info(work)")}
-    for name, definition in _ADDED_COLUMNS:
-        if name not in have:
-            con.execute(f"ALTER TABLE work ADD COLUMN {name} {definition}")
+    for table, added in (("work", _ADDED_COLUMNS), ("outbox", _ADDED_OUTBOX_COLUMNS),
+                         ("proposals", _ADDED_PROPOSAL_COLUMNS)):
+        have = {row[1] for row in con.execute(f"PRAGMA table_info({table})")}
+        for name, definition in added:
+            if name not in have:
+                con.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def proposal_refs(row: dict) -> list[str]:
+    """The workstreams a question is about, first one first."""
+    return [ref for ref in [row.get("ref") or "", *str(row.get("also") or "").split()] if ref]
 
 
 def normalize_ref(value: Any) -> str:

@@ -28,6 +28,7 @@ in a list.
 from __future__ import annotations
 
 import json
+import math
 import re
 from datetime import date, datetime, timezone
 from typing import Any, Collection, Iterable, Mapping, Optional, Sequence
@@ -36,7 +37,16 @@ from . import card_schema
 
 PLAIN = "plain"
 DRAWN = "drawn"
-SHAPES = ("date", "due", "runs", "promise", "status", "steps", DRAWN, PLAIN)
+NUMBER = "number"
+WAITING = "waiting"
+FOUND = "found"
+# Shapes a pick may take only once every Conduit that draws cards draws
+# them (MORE_SHAPES_FEATURE, through drawn_types): an older app would
+# show them as plain words, which is what Pulse leaves out (Eric,
+# 2026-11-11: a number that changed, someone the user is waiting on, and
+# what a watch found, for what fit no card type; three more at most).
+GATED_SHAPES = (NUMBER, WAITING, FOUND)
+SHAPES = ("date", "due", "runs", "promise", "status", "steps", NUMBER, WAITING, FOUND, DRAWN, PLAIN)
 # The morning brief's own look (pulse_brief.look): made in code from its
 # reply, never a shape the model picks.
 BRIEF = "brief"
@@ -51,6 +61,8 @@ FACT_LIMIT = 120
 MAX_RUNS = 10
 MAX_STEPS = 6
 STATES = ("ok", "warn", "fail")
+UNIT_LIMIT = 12
+BETTER = ("up", "down")
 RUN_RESULTS = ("ok", "fail")
 # What a drawn body may be: the chat's cards that show something, never a
 # question, a form or a live card (a Pulse card's buttons are its actions).
@@ -66,12 +78,12 @@ CLOSE = "close"
 # the report, the look ahead, a follow-up and the brief.
 PICK_RULES = """Each thing you bring up is a pick:
 {{"line": "...", "detail": "...", "subject": "#41", "incident": {{"card": "new"}}, "shape": "plain", "facts": {{}}, "actions": [{{"label": "...", "does": "ask", "say": "..."}}]}}
-- "line": the headline, written to the user, at most one sentence. "detail": at most one more sentence, or "".
+- "line": the headline, written to the user, at most one sentence, short (under 15 words), saying the thing itself, never a reason or advice the context doesn't give ("so you can plan around it"). "detail": one more sentence that adds what the line doesn't say (what to do, a number, a name), or "", never the line said again. The card draws the shape's facts under them, so neither needs to repeat them.
 - "subject": the key of what it's about, as the context gives it: a remembered thing (#41), a reminder (r2), a calendar entry (v1), a scheduled job (j3); "" when it has none.
 - "incident": {{"card": "new"}} for something new. When a card under "What Pulse brought up lately" is still open and this is more about that same occurrence (another failed run, a new step), {{"card": "pc_1834"}} with that card's id updates it. When that occurrence is over (the job recovered, it arrived), {{"close": "pc_1834"}} closes it. Something that happened again after it was over is new, not an update.
 - "shape" and its "facts", only what the context states, else "plain" with {{}}:
-  "date" {{"day": "YYYY-MM-DD", "what": "birthday", "whose": "Kwan"}}; "due" {{"due": "YYYY-MM-DD", "noticed": "YYYY-MM-DD"}} (something to get done by a day); "runs" {{"job": "name", "results": ["ok", "fail"]}} (oldest first, at most 10); "promise" {{"person": "Mara", "said": "their words, quoted", "where": "chat title", "when": "Fri"}}; "status" {{"label": "what", "state": "ok" | "warn" | "fail"}}; "steps" {{"names": ["Ordered", "Shipped", "Out today", "Delivered"], "at": 2}} (at = the current step, counted from 0).
-- "actions": at most 2 buttons, each with a short "label" (a few words, like "Restart it") and "does": "ask" with "say" (words for the user to send Hermes in that thing's chat; they can edit them first), "open" with "url" (an https link the context gives), "draft" with "text" (a message for the user to send someone), "done" or "later". [] when there's nothing to do."""
+  "date" {{"day": "YYYY-MM-DD", "what": "birthday", "whose": "Kwan"}} ("whose": a person's name, or "" for the user's own); "due" {{"due": "YYYY-MM-DD", "noticed": "YYYY-MM-DD"}} (something to get done by a day; "noticed": the earlier day it first came up, left out when that's the due day); "runs" {{"job": "name", "results": ["ok", "fail"]}} (a scheduled job's recent runs, oldest first, at most 10: use it rather than "status" when the context shows its runs); "promise" {{"person": "Mara", "said": "their words, quoted", "where": "chat title", "when": "Fri"}}; "status" {{"label": "what", "state": "ok" | "warn" | "fail"}} ("label": the thing in two to four words, like "Nightly backup"); "steps" {{"names": ["Ordered", "Shipped", "Out today", "Delivered"], "at": 2}} (at = the current step, counted from 0). Pick the shape the facts support: a next step after something done is "steps" (what's done, then what's next); something the user or Hermes said they'd do, or the user asked to be reminded of, with no day, is "promise" in the words they said; something that went wrong is "status" or "runs". Never make up a fact to fit a shape.
+- "actions": at most 2 buttons, each with a short "label" (a few words, like "Restart it") and "does": "ask" with "say" (words for the user to send Hermes in that thing's chat; they can edit them first), "open" with "url" (an https link the context gives), "draft" with "text" (a message for the user to send someone), "done" or "later". Give the one most useful step first, named for what it does ("Verify ID", "Plan the day"), never a bare "Do it". For something that went wrong (a failing job, an error, a "warn" or "fail" status), that first step is an "ask" whose "say" has Hermes find out what's wrong and fix it, never only ask how it stands. A calendar entry is already on the user's calendar, with its own alerts: never offer to add it, block time for it, remind about it or check it again; give a step only for preparation the context names, else just "done". An entry on a holiday calendar for another country ("Holidays in Japan") isn't a day off the user keeps. Every step is one Hermes can actually take: it can't change the Conduit app or what its cards can show. [] when there's nothing to do."""
 
 
 def card_id_text(card_id: int) -> str:
@@ -116,25 +128,86 @@ def _day(value: Any, clock: bool = False) -> str:
     return ""
 
 
+# Words in a date's "whose" that name nobody (the user themselves).
+NOBODY = frozenset({"", "your", "you", "yours", "my", "me", "mine", "our", "ours", "we", "user", "the user",
+                    "their", "theirs", "his", "her", "hers"})
+_STOP = frozenset("a an and are as at be both by for from has have in is it its of on or so that the their this "
+                  "to was were will with you your".split())
+
+
+def _stems(text: str) -> list[str]:
+    return [word[:5] for word in re.findall(r"[a-z0-9]+", text.lower()) if word not in _STOP]
+
+
+def repeats(detail: str, line: str) -> bool:
+    """Whether ``detail`` mostly says ``line`` again: at least
+    REPEAT_SHARE of its words (stop words aside, compared by their first
+    five letters) are in the line. One with fewer than SHORT_DETAIL words
+    repeats only when every one of them is in the line, so a short detail
+    that adds a word ("today", a name) is kept."""
+    words, said = _stems(detail), set(_stems(line))
+    if not words:
+        return False
+    # A short detail that adds one word ("today", a name) still says something.
+    if len(words) < SHORT_DETAIL:
+        return all(word in said for word in words)
+    return sum(word in said for word in words) / len(words) >= REPEAT_SHARE
+
+
+REPEAT_SHARE = 0.6
+# Fewer words than this (stop words aside): dropped only when every one is in the line.
+SHORT_DETAIL = 5
+
+
+_PLAIN_NUMBER = re.compile(r"[+-]?(\d+|\d{1,3}(,\d{3})+)(\.\d+)?")
+
+
+def _number(value: Any) -> Optional[float | int]:
+    """A finite number, or a string that's only one ("91", "1,204.5"), as
+    an int when it's whole; None otherwise. A comma is read only as a
+    thousands mark between groups of three: "1.204,50" could be 1204.5 or
+    1.2045, so it's no number here rather than a wrong one."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, str):
+        if not _PLAIN_NUMBER.fullmatch(value.strip()):
+            return None
+        value = float(value.strip().replace(",", ""))
+    if not isinstance(value, (int, float)):
+        return None
+    try:
+        # A whole number too big for a float is no number a card can show.
+        if not math.isfinite(float(value)):
+            return None
+    except OverflowError:
+        return None
+    return int(value) if float(value).is_integer() and abs(value) < 1e15 else float(value)
+
+
 def _facts(shape: str, facts: Any, drawn_types: Sequence[str]) -> tuple[Optional[dict], str]:
     """``facts`` checked for ``shape``: (the facts kept, "") or (None, why
     they don't hold up)."""
     if shape == PLAIN:
         return {}, ""
+    if shape in GATED_SHAPES and shape not in drawn_types:
+        return None, "shape_not_drawn"
     if not isinstance(facts, dict):
         return None, "no_facts"
     if shape == "date":
         day = _day(facts.get("day"))
         if not day:
             return None, "bad_day"
+        whose = _text(facts.get("whose"), FACT_LIMIT)
+        # "your" or "the user" names nobody: the tile shows only a name.
         return {"day": day, "what": _text(facts.get("what"), FACT_LIMIT),
-                "whose": _text(facts.get("whose"), FACT_LIMIT)}, ""
+                "whose": "" if re.sub(r"['’]s$", "", whose.lower().strip(" .")) in NOBODY else whose}, ""
     if shape == "due":
         due = _day(facts.get("due"), clock=True)
         if not due:
             return None, "bad_due"
         noticed = _day(facts.get("noticed"))
-        return {"due": due, **({"noticed": noticed} if noticed and noticed <= due[:10] else {})}, ""
+        # Noticed the day it's due, a bar from it to the due day says nothing.
+        return {"due": due, **({"noticed": noticed} if noticed and noticed < due[:10] else {})}, ""
     if shape == "runs":
         results = facts.get("results")
         if not isinstance(results, list) or not results or any(r not in RUN_RESULTS for r in results):
@@ -157,6 +230,28 @@ def _facts(shape: str, facts: Any, drawn_types: Sequence[str]) -> tuple[Optional
                 or not isinstance(at, int) or isinstance(at, bool) or not 0 <= at < len(names)):
             return None, "bad_steps"
         return {"names": [_text(n, 40) for n in names], "at": at}, ""
+    if shape == NUMBER:
+        label, value = _text(facts.get("label"), FACT_LIMIT), _number(facts.get("value"))
+        if not label or value is None:
+            return None, "bad_number"
+        kept: dict[str, Any] = {"label": label, "value": value, "unit": _text(facts.get("unit"), UNIT_LIMIT)}
+        for key in ("was", "limit"):
+            if (number := _number(facts.get(key))) is not None:
+                kept[key] = number
+        if facts.get("better") in BETTER:
+            kept["better"] = facts["better"]
+        return kept, ""
+    if shape == WAITING:
+        person, what = _text(facts.get("person"), FACT_LIMIT), _text(facts.get("what"), FACT_LIMIT)
+        if not person or not what:
+            return None, "bad_waiting"
+        since = _day(facts.get("since"))
+        return {"person": person, "what": what, **({"since": since} if since else {})}, ""
+    if shape == FOUND:
+        found = {key: _text(facts.get(key), FACT_LIMIT) for key in ("asked", "answer", "where")}
+        if not all(found.values()):
+            return None, "bad_found"
+        return found, ""
     if shape == DRAWN:
         body = facts.get("body")
         kind = body.get("type") if isinstance(body, dict) else None
@@ -179,6 +274,40 @@ def _url(value: Any) -> str:
             or card_schema._OPEN_BANNED.search(url)):
         return ""
     return url
+
+
+# A calendar entry's key as the model gives it (pulse_report.phone_context)
+# and as a card keeps it (pulse_candidates.EVENT), and the button words
+# that would put it on, or check it against, the calendar it came from.
+# Moving or cancelling it is a real step and stays.
+_CALENDAR_SUBJECT = re.compile(r"v\d+")
+CALENDAR_CARD_SUBJECT = "event:"
+_ONTO_CALENDAR = re.compile(r"\b(?:calendar|schedule|remind\w*)\b|\bblock\b.*\btime\b", re.IGNORECASE)
+_KEEPS_STEP = re.compile(r"\b(?:reschedul\w*|cancel\w*|mov(?:e|es|ed|ing)|shift\w*)\b", re.IGNORECASE)
+
+
+def _onto_calendar(action: Mapping[str, Any]) -> bool:
+    if action.get("does") == OPEN:  # a link to the entry only shows it
+        return False
+    words = " ".join(str(action.get(key) or "") for key in ("label", "say"))
+    return bool(_ONTO_CALENDAR.search(words)) and not _KEEPS_STEP.search(words)
+
+
+def from_calendar(subject: Any, event: Any = "") -> bool:
+    """Whether a pick or card is about a calendar entry: by the model's key
+    ("v1", as its subject or event) or by a card's "event:" subject."""
+    for key in (subject, event):
+        key = str(key or "").strip().lower()
+        if _CALENDAR_SUBJECT.fullmatch(key) or key.startswith(CALENDAR_CARD_SUBJECT):
+            return True
+    return False
+
+
+def off_calendar(actions: Any) -> list:
+    """``actions`` without a button to put a calendar entry on the calendar
+    it was read from."""
+    return [action for action in actions if not (isinstance(action, Mapping) and _onto_calendar(action))] \
+        if isinstance(actions, list) else []
 
 
 def _actions(value: Any) -> list[dict]:
@@ -238,8 +367,12 @@ def parse(entry: Any, *, drawn_types: Sequence[str] = (), line: str = "") -> tup
         why = "unknown_shape"
     kind, card = incident(entry.get("incident"))
     pick: dict[str, Any] = {
-        "line": words, "detail": _text(entry.get("detail"), DETAIL_LIMIT), "shape": shape, "facts": facts,
-        "actions": _actions(entry.get("actions")), "incident": {"card": NEW} if kind == NEW else
+        "line": words, "detail": "" if repeats(detail := _text(entry.get("detail"), DETAIL_LIMIT), words) else detail,
+        "shape": shape, "facts": facts,
+        # A calendar entry's buttons lose the calendar ones before the cap, so
+        # a step after them still fits.
+        "actions": _actions(off_calendar(entry.get("actions")) if from_calendar(entry.get("subject"), entry.get("event"))
+                            else entry.get("actions")), "incident": {"card": NEW} if kind == NEW else
         ({"card": card_id_text(card)} if kind == UPDATE else {"close": card_id_text(card)})}
     subject = entry.get("subject")
     if isinstance(subject, str) and subject.strip():
@@ -258,7 +391,10 @@ def news(pick: Mapping[str, Any]) -> str:
 def merged_facts(shape: str, old: Mapping[str, Any], new: Mapping[str, Any]) -> dict:
     """An update's facts on top of the card's: a run history grows (the
     newer results after what the card had, at most MAX_RUNS), anything else
-    takes the newer facts."""
+    takes the newer facts. A number's "was" goes with the value it was
+    given for: a newer value that says nothing of what it was before
+    doesn't keep the older card's, and it keeps the card's unit when it
+    names none."""
     if shape == "runs" and isinstance(old.get("results"), list) and isinstance(new.get("results"), list):
         mine, theirs = list(old["results"]), list(new["results"])
         # The model sees the whole recent history each time: what it gives
@@ -269,6 +405,12 @@ def merged_facts(shape: str, old: Mapping[str, Any], new: Mapping[str, Any]) -> 
                 overlap = size
                 break
         return {**old, **new, "results": (mine + theirs[overlap:])[-MAX_RUNS:]}
+    if shape == NUMBER:
+        if "value" in new and "was" not in new:
+            old = {key: value for key, value in old.items() if key != "was"}
+        # The same thing keeps its unit when the newer facts name none.
+        if not new.get("unit") and old.get("unit"):
+            new = {key: value for key, value in new.items() if key != "unit"}
     return {**old, **new}
 
 
@@ -293,9 +435,11 @@ def look(card: Mapping[str, Any]) -> dict:
     pick = loads(card.get("look"))
     if pick is None:
         return {"shape": PLAIN, "facts": {}, "actions": []}
+    actions = pick.get("actions") if isinstance(pick.get("actions"), list) else []
     return {"shape": pick.get("shape") if pick.get("shape") in SHAPES + (BRIEF,) else PLAIN,
             "facts": pick.get("facts") if isinstance(pick.get("facts"), dict) else {},
-            "actions": pick.get("actions") if isinstance(pick.get("actions"), list) else [],
+            # A card kept from before calendar entries lost the button loses it too.
+            "actions": off_calendar(actions) if from_calendar(card.get("subject"), pick.get("subject")) else actions,
             "line": str(pick.get("line") or ""), "detail": str(pick.get("detail") or "")}
 
 
@@ -396,6 +540,8 @@ def updated_card(card: Mapping[str, Any], pick: Mapping[str, Any], subject: str 
         merged["facts"] = merged_facts(str(pick.get("shape")), old["facts"], pick.get("facts") or {})
     if not merged.get("actions") and isinstance(old.get("actions"), list):
         merged["actions"] = old["actions"]
+    if from_calendar(subject or card.get("subject"), pick.get("subject")):
+        merged["actions"] = off_calendar(merged.get("actions"))
     merged["incident"] = {"card": card_id_text(int(card["id"]))}
     columns = {"news": news(merged), "look": dumps(merged)}
     if subject and not card.get("subject"):
@@ -425,10 +571,16 @@ def count(pulse_store: Any, now: float, keys: Sequence[str]) -> None:
 LOOKS_FEATURE = "pulse-looks"
 
 
+# What a Conduit that draws GATED_SHAPES says (2.4.x).
+MORE_SHAPES_FEATURE = "pulse-more-shapes"
+
+
 def drawn_types(home: Any) -> tuple[str, ...]:
-    """The chat card types a "drawn" pick may use: none until every Conduit
-    that draws cards draws Pulse looks, then those whose feature every one
-    of them has (as conduit_show leaves out what one can't draw)."""
+    """What every Conduit that draws cards can draw beyond the first shapes:
+    the chat card types a "drawn" pick may use, then GATED_SHAPES. None
+    until every one draws Pulse looks; then the card types whose feature
+    every one of them has (as conduit_show leaves out what one can't draw),
+    and the gated shapes once every one says MORE_SHAPES_FEATURE."""
     try:
         from .present_store import PresentStore
         present = PresentStore(home)
@@ -436,17 +588,35 @@ def drawn_types(home: Any) -> tuple[str, ...]:
             return ()
         hidden = {kind for feature, kinds in card_schema.FEATURE_TYPES.items()
                   if not present.has_feature_everywhere(feature) for kind in kinds}
+        shapes = GATED_SHAPES if present.has_feature_everywhere(MORE_SHAPES_FEATURE) else ()
     except Exception:  # noqa: BLE001 - nothing drawn when it can't tell
         return ()
-    return tuple(kind for kind in DRAWN_TYPES if kind not in hidden)
+    return tuple(kind for kind in DRAWN_TYPES if kind not in hidden) + shapes
 
 
 def rules(drawn: Sequence[str]) -> str:
     """PICK_RULES for a prompt, with the "drawn" shape when there are card
     types to draw it with."""
     text = PICK_RULES.replace("{{", "{").replace("}}", "}")
-    if drawn:
+    if NUMBER in drawn:
+        text += ("\n- \"number\" {\"label\": \"Disk on nas-01\", \"value\": 91, \"unit\": \"%\", \"was\": 78, \"limit\": 90, "
+                 "\"better\": \"down\"}: a measured value the context states, when the news is the number itself (a price, "
+                 "a balance, how full something is); \"was\": the earlier value it gives, \"limit\": a threshold it names, "
+                 "\"better\": \"up\" or \"down\" when which way is good is plain; leave out what it doesn't give. Use it "
+                 "rather than \"status\" when there's a number to show.")
+    if WAITING in drawn:
+        text += ("\n- \"waiting\" {\"person\": \"Dana\", \"what\": \"the signed lease\", \"since\": \"YYYY-MM-DD\"}: someone "
+                 "owes the user a reply or a thing (who, what, and the day they were asked or said they'd send it, "
+                 "left out when the context doesn't give it). It's the other side of \"promise\", which is what the user "
+                 "or Hermes said they'd do.")
+    if FOUND in drawn:
+        text += ("\n- \"found\" {\"asked\": \"tickets for the Phoebe Bridgers show\", \"answer\": \"On sale Friday at 10am\", "
+                 "\"where\": \"Ticketmaster\"}: the answer to something the user asked Hermes to watch for or find out (what "
+                 "they asked for, what was found, and where it was found, each as the context gives it). Use it for a "
+                 "watch's or a question's answer that no other shape shows.")
+    cards = [kind for kind in drawn if kind not in GATED_SHAPES]
+    if cards:
         text += ("\n- \"drawn\" {\"body\": a card} when none of those shapes fits and a chart, weather, steps, stats, "
                  "a table or another card shows it better than words: the body is one conduit_show card of type "
-                 + ", ".join(drawn) + ", with no buttons.")
+                 + ", ".join(cards) + ", with no buttons.")
     return text

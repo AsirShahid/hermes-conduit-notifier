@@ -139,7 +139,8 @@ ROUTE_CAPABILITIES = (
     # Pulse cards come from structured picks (pulse_picks): GET
     # /pulse/feed?looks=1 gives each card "look" ({shape, facts, actions,
     # line, detail}; shape one of date, due, runs, promise, status,
-    # steps, drawn, plain), "card_ref" ("pc_<id>"), "subject" and
+    # steps, drawn, plain, and number, waiting, found once every Conduit
+    # says "pulse-more-shapes"), "card_ref" ("pc_<id>"), "subject" and
     # "updated_at"; an action that "ask"s leaves its "say" in the chat's
     # composer. The morning brief's parts come in its "look" (shape "brief").
     "pulse_looks",
@@ -156,6 +157,15 @@ ROUTE_CAPABILITIES = (
     "phone-sync",
     "phone-alarms",
     "phone-contacts",
+    # sharing.shortcuts and a batch's "shortcuts" (the Shortcuts Hermes may
+    # run, by name), the run_shortcut change and a result's "result" text.
+    "phone-shortcuts",
+    # sharing.contacts_edit and the add_contact, update_contact and
+    # delete_contact changes.
+    "phone-contact-edits",
+    # sharing.photos, a batch's "photos" ({full, upsert, delete}) and
+    # "photo_files" (a picture the user said yes to), and the send_photo change.
+    "phone-photos",
     "location-sync",
     "location-locate",
     # sharing.other_profiles: the host's other profiles paired with the

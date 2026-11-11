@@ -13,7 +13,7 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
-## 0.151.1 (2026-11-09)
+## 0.162.1 (2026-11-11)
 
 ### Fixes
 - Android notification deliveries stop after unregister, key replacement, disabling notifications or plugin unload. A phone notification cannot park a relay-only clarification.
@@ -21,6 +21,350 @@ checks it). The format is fixed, because Conduit reads it:
 ### New and improved
 - This Android fork adds encrypted UnifiedPush delivery, scoped registration, room invites and private Pulse notification levels on the current host plugin.
 - Android and Wear OS can hold a visible chat independently of Apple devices. Typed watch messages stay typed, and Android Auto receives driving-appropriate reply guidance.
+
+## 0.162.0 (2026-11-11)
+
+### New and improved
+- Pulse has three more card types: a number that changed (a price drop, a
+  disk filling up, with what it was before and any limit), someone you're
+  waiting on (who owes you a reply or a thing, and since when), and what
+  something you asked Hermes to watch for turned up. Conduit shows them once
+  every Conduit you use can draw them.
+
+## 0.161.4 (2026-11-11)
+
+### Fixes
+- A photo search for "leaves" or "knives" missed photos that said "leaf" or
+  "knife", half-width katakana text wasn't searched inside, and one-letter
+  searches matched inside any Chinese, Japanese or Korean text.
+
+## 0.161.3 (2026-11-11)
+
+### Fixes
+- A scheduled job's report shown in a Bot Chat showed a picture or file it
+  made as a file path. Hermes Desktop now shows the picture or the file
+  itself; Conduit does too once it's updated.
+
+## 0.161.2 (2026-11-11)
+
+### Fixes
+- A photo search for one thing missed photos whose text named several
+  ("umbrella" didn't find "2 umbrellas"), and "beaches" or "ponies" found
+  nothing.
+- A number or name inside Japanese or Chinese text in a photo wasn't found.
+- If your iPhone's clock ran fast right after you set it up with Conduit
+  again, the photos it had already sent to Hermes were deleted.
+
+## 0.161.1 (2026-11-11)
+
+### Fixes
+- Setting your iPhone up with Conduit again deleted the photos it had already
+  sent to Hermes straight away, instead of keeping them for a week.
+- Turning Photos off left when and where a requested photo was taken in
+  Hermes' list of requests. That's forgotten now too.
+- A photo search for a short word also found longer words that contain it
+  ("cat" found "category"), and a search of only punctuation or emoji listed
+  every photo.
+
+## 0.161.0 (2026-11-11)
+
+### New and improved
+- Hermes can search your photos when you turn on Photos in Conduit
+  (Calendar & phone). Conduit describes each photo on your iPhone and sends
+  only that description; when Hermes wants to see one, Conduit shows it to
+  you and sends it only if you say yes. Needs a Conduit update too.
+
+## 0.160.1 (2026-11-11)
+
+### Fixes
+- With two phones sharing contacts, a contact change for someone picked on
+  the other phone failed without saying why; it now says which phone to use.
+
+## 0.160.0 (2026-11-10)
+
+### New and improved
+- Hermes can ask to add a contact, or change or delete one of the people you
+  picked for it, when you let it in Conduit (Calendar & phone > People).
+  Conduit always asks you first. Needs a Conduit update too.
+
+## 0.159.0 (2026-11-10)
+
+### New and improved
+- Hermes can run the Shortcuts you list for it in Conduit (Calendar & phone),
+  by name, with text to hand them, and gets back what the shortcut returns.
+  A run asks you first unless you let Hermes run them without asking, and
+  happens when Conduit is open, since iOS runs shortcuts in the Shortcuts app.
+  Needs a Conduit update too.
+
+## 0.158.3 (2026-11-10)
+
+### Fixes
+- After an Apple Watch call, Hermes could keep treating you as busy for up
+  to a minute and a half (no calls rang), or ring a second Watch call that
+  was still going. A Watch call now lets go of that hold exactly when it
+  ends, and never clears one another call still holds.
+
+## 0.158.2 (2026-11-10)
+
+### Fixes
+- During an Apple Watch call, Hermes could still try to phone you and say
+  your phone was about to ring. The ring then hit the busy Watch, which
+  declined it and could lose its microphone until you tapped. A Watch call
+  now counts as being in a call, as a phone call does: nothing rings over
+  it, and Hermes is told at once that you're already talking.
+
+## 0.158.1 (2026-11-10)
+
+### Fixes
+- A reworded question no longer says "New since the last no" when you never
+  said no to it.
+
+## 0.158.0 (2026-11-10)
+
+### New and improved
+- Under Ask Me First a bot asks you about a workstream once: while that
+  question is open it won't ask again, and after a no it waits a day unless
+  something new came up, which it tells you. A decision that touches several
+  workstreams is one question, and your answer covers each.
+
+## 0.157.9 (2026-11-10)
+
+### New and improved
+- A bot runs up to 4 workstreams at once by default, up from 2. A bot you've
+  already set keeps its number; change it in Edit Bot > Work.
+
+## 0.157.8 (2026-11-10)
+
+### Fixes
+- Pulse: something you asked Pulse to watch for still comes up when it fits no
+  card type, a reminder you asked for is drawn in your own words, and a card
+  isn't lost when Pulse found the same thing twice and only one of the two fit
+  a type.
+
+## 0.157.7 (2026-11-10)
+
+### New and improved
+- Fewer, better Pulse cards: a report or look ahead brings up only what fits a
+  card type (a date, something due, a job's runs, a promise, a status, steps).
+  What fits none stays out, unless you asked to be reminded of it. When Pulse
+  is unsure whether something is worth your time, it leaves it out.
+
+## 0.157.6 (2026-11-10)
+
+### Fixes
+- A card about a calendar entry no longer offers a reminder for it, since the
+  entry has its own alerts.
+- A card matched to a calendar entry by its name could lose its Done button
+  when the buttons it shouldn't have were dropped.
+
+## 0.157.5 (2026-11-10)
+
+### Fixes
+- One morning brief a day: when several profiles share a host, each one's
+  process could send its own at the brief's time, up to four at once.
+- Pulse no longer brings up what only says back what you asked for or
+  decided, a remembered fact with nothing to do about it now, a watch whose
+  condition hasn't happened, or Hermes saying what it's about to do next
+  while it works. A tool error that only tells Hermes what to do instead
+  stays Hermes's.
+- Calendar entries show which calendar they're on, and a holiday from
+  another country's holiday calendar isn't treated as yours. Cards about a
+  calendar entry don't offer a reminder for it, and no card offers a step
+  Hermes can't take, like changing the app.
+- A card held for a place no longer reads the place into what it's about.
+- On a calendar card, Move it and Open in Calendar stay, and a Done after a
+  dropped button still fits.
+
+## 0.157.4 (2026-11-10)
+
+### Fixes
+- A card about something on your calendar also loses an "add to calendar",
+  "block time" or "check your schedule" button when Pulse matched it to the
+  entry by name, when the card is updated, and on cards you already have.
+  Moving or cancelling the entry is still offered.
+
+## 0.157.3 (2026-11-10)
+
+### Fixes
+- The morning brief also drops the follow-up, other and next tags, an item
+  number copied from its related or later lines, and markers in its opening
+  line, which is the brief's push. A line starting with a real number, such
+  as "#1 priority", keeps it.
+- A card about something on your calendar no longer offers to add it to the
+  calendar or block time for it, and its headline says the thing without
+  made-up advice.
+
+## 0.157.2 (2026-11-10)
+
+### Fixes
+- The morning brief's lines no longer show Pulse's own markers, like
+  "[interest]" or "#481", in front of or after what they say.
+
+## 0.157.1 (2026-11-10)
+
+### Fixes
+- A new task is no longer taken for part of an open workstream because both
+  say "a.m." or name files of the same kind, or because each names a
+  config.py in a different folder of one project. Without the update the
+  Bot Chat could send it into the wrong workstream.
+
+## 0.157.0 (2026-11-10)
+
+### Fixes
+- A Bot Chat that asked you a question about a workstream waits for your
+  answer. Without the update it could ask and then redirect the workstream
+  anyway.
+- A workstream's checklist is kept when it marks a step "pending" or
+  "in progress". Without the update Hermes refused the whole report.
+
+### New and improved
+- The Bot Chat sees what each workstream covers: its task, its folder and
+  the files it touched. A new task that belongs with one, by its files or
+  most of its words, is sent there and not started a second time, also when
+  that work finished a few hours ago.
+- Quick Things Here: you choose how many steps the Bot Chat does itself in
+  one turn before the rest goes to a workstream: 5 (as before), 10 or 20,
+  per bot, in Edit Bot > Work (with a Conduit build that shows it). The
+  time it may take grows with the steps.
+
+## 0.156.0 (2026-11-10)
+
+### New and improved
+- With Read replies aloud on in Conduit, Hermes knows a typed message's
+  answer will be heard too, so it doesn't send a sound file of its own.
+
+## 0.155.2 (2026-11-10)
+
+### Fixes
+- A Pulse card about something that went wrong offers to fix it. Without the
+  update its button could only ask how it stands.
+
+## 0.155.1 (2026-11-10)
+
+### Fixes
+- What you write in a workstream's chat while it works is read by the helper
+  when its turn ends. Without the update it waited for the next report.
+- The Bot Chat's note about a connection between two workstreams always
+  quotes the report it is about, also when that report had many lines.
+- Coordination on the Work panel shows whether an older message arrived,
+  also after many later messages to the same workstream.
+
+## 0.155.0 (2026-11-10)
+
+### New and improved
+- While workstreams work, a helper model reads what they report. When one
+  workstream's finding could matter to another, the Bot Chat hears of it
+  while the first is still running, not only when a turn ends, and acts as
+  your Coordination setting says. The helper never messages a workstream.
+  It is "Conduit work watch" among Hermes' helper models: the bot's own
+  model until you pick another, and a small fast one is enough.
+- Conduit's Work panel can list what the Bot Chat did to keep the work in
+  step over the last day, each with the lines behind it (with a Conduit
+  build that shows it).
+
+## 0.154.0 (2026-11-10)
+
+### New and improved
+- A Bot Chat keeps its workstreams working together. It sees what each one
+  found, relies on and changed, and what you told it in its own chat, and
+  acts when one affects another. Under Edit Bot > Work > Coordination, Ask
+  (the default) has it ask you before it starts, stops or redirects work on
+  its own, Automatic lets it, and Off keeps it as it was.
+- A work update the bot has nothing to tell you about stays silent.
+- Leave alone on a workstream's card keeps the bot from sending to it or
+  stopping it on its own.
+
+## 0.153.8 (2026-11-10)
+
+### Fixes
+- Pulse no longer reads a subagent's chat as if you wrote it, so a task a
+  bot handed to a subagent no longer comes up as "You requested…". What it
+  already learned that way is forgotten once.
+
+## 0.153.7 (2026-11-10)
+
+### Fixes
+- A script's `hermes chat --source tool` run, a one-shot `hermes chat -q`
+  and a Kanban worker no longer send a reply, failure or background-task
+  notification or show Lock Screen progress. Their answers go to whoever
+  ran them; one they write with `conduit_notify` still comes.
+
+## 0.153.6 (2026-11-10)
+
+### Fixes
+- A bot whose tool call carries arguments that aren't valid JSON is told
+  what's wrong with them, instead of being refused as if it had asked for
+  nothing.
+- A workstream's update that Hermes took too long to accept still counts
+  as Conduit's own turn, so its review card isn't refused when only the
+  desktop app has the Bot Chat open.
+- A review of seven or eight options from a workstream with a long name
+  keeps "(more)" on its second half, so the two halves read differently.
+
+## 0.153.5 (2026-11-10)
+
+### Fixes
+- A message a Bot Chat sends to a workstream is no longer sent a second time
+  after a restart when Hermes had saved it joined to another message, such
+  as your own words sent at the same moment.
+
+## 0.153.4 (2026-11-10)
+
+### Fixes
+- On a Hermes newer than 0.23.0, your first message after a Pulse report no
+  longer hands the report to your memory provider as your last message.
+
+## 0.153.3 (2026-11-10)
+
+### Fixes
+- A Pulse card keeps a short sentence that adds one word to its headline,
+  such as "today" or a name, instead of dropping it as a repeat.
+- A Pulse date card no longer says whose day it is as "The user's".
+
+## 0.153.2 (2026-11-10)
+
+### Fixes
+- Pulse cards that Pulse's learning brings up on its own get the same
+  headline, facts and buttons as the rest, instead of plain text.
+- Pulse cards no longer repeat their headline in the sentence under it,
+  draw a due bar that starts and ends on the same day, or show "your"
+  where a date names whose it is.
+
+### New and improved
+- Pulse asks for shorter headlines, a named first step instead of a bare
+  "Do it", and a job's run history when it has one.
+
+## 0.153.1 (2026-11-09)
+
+### Fixes
+- A workstream's update that waits behind a long turn still shows its cards
+  in the chat when it starts, even if only Desktop has the chat open then.
+- Two identical workstream updates sent close together each count as the
+  plugin's own, not just the first.
+
+## 0.153.0 (2026-11-09)
+
+### New and improved
+- Local Live's agent mode now works on speech servers that only read text
+  aloud, like a self-hosted voice adapter: your fast model answers each thing
+  you say and hands real work to Hermes as a job, so replies start sooner
+  instead of waiting for a full Hermes turn.
+
+## 0.152.0 (2026-11-09)
+
+### Fixes
+- An iPad or iPhone still on an older Conduit, opened in the last few days,
+  no longer keeps newer cards (like review cards) from showing on the device
+  you're using. The older one shows less until you update it.
+- When a bot's tool call can't be read, it now hears exactly what was wrong
+  with it, so it can fix the call instead of giving up on the card.
+- A card your Bot Chat shows when a workstream reports back is no longer
+  refused because Hermes Desktop or a browser had the chat open at the time,
+  and that update's reply no longer counts as sent from Desktop (for its
+  notification and for calls held while you're at a screen).
+- With a chat open in Conduit and in Hermes Desktop at once, a message from
+  the phone that has it on screen gets cards again: the bot is told to draw
+  them, and hears which Conduit screen you wrote from.
 
 ## 0.151.0 (2026-11-09)
 

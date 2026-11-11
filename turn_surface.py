@@ -52,6 +52,7 @@ import hashlib
 import re
 import sys
 import threading
+from collections import OrderedDict
 import time
 from typing import Any, Callable, Optional, Tuple
 
@@ -110,16 +111,25 @@ FORM_HINT = ("When you need several details only the user can give (like dates o
 # for still goes: the chat shows it as a card.
 SPOKEN_HINT = ("The answer is heard: say it in words, never with text_to_speech or a sound file of your own. "
                "A file the user asks for is still fine.")
+# Said for a typed message whose reply Conduit reads aloud as well as shows
+# (its Read replies aloud setting, notifier issue 674): a sound file of the
+# agent's own would be a second voice under Conduit's, and its MEDIA: tag
+# isn't read. The answer is still read on a screen, so nothing else changes.
+HEARD_HINT = ("Conduit also reads the answer aloud: never say it with text_to_speech or a sound file of your own. "
+              "A file the user asks for is still fine.")
 
 
 class Report:
-    __slots__ = ("session_id", "text_sha256", "surface", "entry")
+    __slots__ = ("session_id", "text_sha256", "surface", "entry", "heard")
 
-    def __init__(self, session_id: str, text_sha256: str, surface: str, entry: Optional[str]) -> None:
+    def __init__(self, session_id: str, text_sha256: str, surface: str, entry: Optional[str],
+                 heard: bool = False) -> None:
         self.session_id = session_id
         self.text_sha256 = text_sha256
         self.surface = surface
         self.entry = entry
+        # A typed message whose reply Conduit reads aloud (HEARD_HINT).
+        self.heard = heard
 
 
 def parse(body: Any) -> Report:
@@ -139,7 +149,10 @@ def parse(body: Any) -> Report:
     entry = body.get("input")
     if entry is not None and (not isinstance(entry, str) or entry not in INPUTS):
         raise ValueError(f"input must be one of {', '.join(INPUTS)}, or left out")
-    return Report(session_id.strip(), digest, surface, entry)
+    heard = body.get("heard", False)
+    if not isinstance(heard, bool):
+        raise ValueError("heard must be true or false, or left out")
+    return Report(session_id.strip(), digest, surface, entry, heard)
 
 
 def text_sha256(text: str) -> str:
@@ -156,7 +169,7 @@ def record(session: dict, report: Report, clock: Callable[[], float] = time.mono
     kept = {digest: value for digest, value in kept.items() if _fresh(value, now)} if isinstance(kept, dict) else {}
     # A repeated text moves to the end, so eviction takes the oldest report.
     kept.pop(report.text_sha256, None)
-    kept[report.text_sha256] = (report.surface, report.entry, now)
+    kept[report.text_sha256] = (report.surface, report.entry, now, bool(report.heard))
     while len(kept) > MAX_KEPT:
         kept.pop(next(iter(kept)))
     # One assignment: the turn thread reads the whole map or the old one.
@@ -164,9 +177,9 @@ def record(session: dict, report: Report, clock: Callable[[], float] = time.mono
 
 
 def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic,
-         fresh_s: float = FRESH_S) -> Optional[Tuple[str, Optional[str]]]:
+         fresh_s: float = FRESH_S) -> Optional[Tuple[str, Optional[str], bool]]:
     """Removes the report for ``message`` kept on ``session`` and returns its
-    surface and entry while fresh."""
+    surface, entry and whether its reply is heard, while fresh."""
     if not isinstance(session, dict):
         return None
     kept = session.get(KEY)
@@ -176,12 +189,12 @@ def take(session: Any, message: Any, clock: Callable[[], float] = time.monotonic
     value = kept.pop(text_sha256(text), None)
     if value is None or not _fresh(value, clock(), fresh_s):
         return None
-    surface, entry, _at = value
-    return surface, entry if entry in INPUTS else None
+    surface, entry, _at, heard = value
+    return surface, entry if entry in INPUTS else None, heard is True
 
 
 def _fresh(value: Any, now: float, fresh_s: float = FRESH_S) -> bool:
-    if not (isinstance(value, tuple) and len(value) == 3 and value[0] in SURFACES):
+    if not (isinstance(value, tuple) and len(value) == 4 and value[0] in SURFACES):
         return False
     at = value[2]
     return isinstance(at, float) and 0 <= now - at <= fresh_s
@@ -199,10 +212,11 @@ def _message_text(message: Any) -> Optional[str]:
     return None
 
 
-def line(surface: str, entry: Optional[str] = None) -> str:
+def line(surface: str, entry: Optional[str] = None, heard: bool = False) -> str:
     where = SURFACES[surface] + (f", {entry}" if entry else "")
     hint = FORM_HINT if surface in SCREENS and entry == "typed" else HINTS.get(surface)
-    hints = [text for text in (hint, SPOKEN_HINT if entry == "spoken" else None) if text]
+    sound = SPOKEN_HINT if entry == "spoken" else HEARD_HINT if heard else None
+    hints = [text for text in (hint, sound) if text]
     return f"[Conduit: this message came from {where}.{''.join(' ' + text for text in hints)}]"
 
 
@@ -302,7 +316,7 @@ def parse_discard(body: Any) -> Tuple[str, str]:
 
 
 def _take_for_authority(session_id: Any, message: Any, clock: Callable[[], float]
-                        ) -> Optional[Tuple[str, Optional[str]]]:
+                        ) -> Optional[Tuple[str, Optional[str], bool]]:
     if not isinstance(session_id, str) or not session_id:
         return None
     lock, chats = _authority_store()
@@ -323,10 +337,83 @@ _turn_entries_lock = threading.Lock()
 MAX_TURN_ENTRIES = 256
 
 
-def start_turn(session_id: Any) -> None:
+# The plugin's own work updates into a Bot Chat (work_broker.Broker.wake),
+# by their text, until their turn starts: Hermes binds such a turn to
+# whichever client has the chat open, Hermes Desktop or a browser, though no
+# client sent it. Only a turn whose message is one of them counts, never one
+# that merely reads like one.
+WAKE_TTL_S = 6 * 3600.0  # queued behind the chat's running turn, which may be long
+_wakes: "OrderedDict[str, list[float]]" = OrderedDict()
+_woken: "OrderedDict[str, bool]" = OrderedDict()
+
+
+MAX_WAKE_SENDS = 32  # per text; past it the oldest sending's turn counts as any other
+
+
+def expect_wake(text: Any, clock: Callable[[], float] = time.monotonic) -> Optional[float]:
+    """The plugin is about to send ``text`` as its own hidden turn. Returns
+    the sending's mark, for discard_wake when the send doesn't go out."""
+    if not isinstance(text, str) or not text.strip():
+        return None
+    key = text.strip()
+    with _turn_entries_lock:
+        # The same text may go to two chats (one question asked of two
+        # bots): each sending waits for a turn of its own. A sending past
+        # the window will never count, so it goes now.
+        now = clock()
+        sent = [at for at in _wakes.pop(key, []) if 0 <= now - at <= WAKE_TTL_S]
+        _wakes[key] = [*sent, now][-MAX_WAKE_SENDS:]
+        while len(_wakes) > MAX_TURN_ENTRIES:
+            _wakes.popitem(last=False)
+        return now
+
+
+def discard_wake(text: Any, at: Optional[float]) -> None:
+    """A sending expect_wake recorded didn't go out (refused or failed): no
+    turn will answer it, so a turn with that text later isn't the plugin's."""
+    if not isinstance(text, str) or at is None:
+        return
+    key = text.strip()
+    with _turn_entries_lock:
+        sent = _wakes.get(key)
+        if sent and at in sent:
+            sent.remove(at)
+            if not sent:
+                del _wakes[key]
+
+
+def start_turn(session_id: Any, user_message: Any = None, clock: Callable[[], float] = time.monotonic) -> None:
     """A turn of ``session_id`` starts: what an earlier turn's message was
-    sent as no longer counts."""
+    sent as no longer counts. ``user_message`` says whether it's one of the
+    plugin's own work updates (expect_wake)."""
     _keep_entry(session_id, None)
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _turn_entries_lock:
+        _woken.pop(session_id, None)
+        key = user_message.strip() if isinstance(user_message, str) else None
+        now = clock()
+        times = [at for at in _wakes.get(key, []) if 0 <= now - at <= WAKE_TTL_S] if key else []
+        if key in _wakes:
+            del _wakes[key]
+        sent = times.pop(0) if times else None
+        if times:
+            _wakes[key] = times
+        if sent is not None:
+            _woken[session_id] = True
+            while len(_woken) > MAX_TURN_ENTRIES:
+                _woken.popitem(last=False)
+
+
+def woken(session_id: Any) -> bool:
+    """Whether ``session_id``'s running turn answers the plugin's own work
+    update, which no client sent: the clients that have the chat open don't
+    say where it came from (.52, 2026-11-09: Desktop alone had the Bot Chat
+    open, and its review card was refused as not_conduit)."""
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    with _turn_entries_lock:
+        return session_id in _woken
 
 
 def turn_entry(session_id: Any) -> Optional[str]:
@@ -373,11 +460,11 @@ def note(from_conduit: bool, message: Any, transport: Any = None,
         if kept is None:
             # The plugin's Watch jobs and call chats name their own surface.
             surface = getattr(transport, "conduit_surface", None)
-            kept = (surface, getattr(transport, "conduit_input", None)) if surface in SURFACES else None
+            kept = (surface, getattr(transport, "conduit_input", None), False) if surface in SURFACES else None
         if kept is None:
             return None
-        surface, entry = kept
+        surface, entry, heard = kept
         _keep_entry(session_id, entry)
-        return line(surface, entry if entry in INPUTS else None)
+        return line(surface, entry if entry in INPUTS else None, heard)
     except Exception:  # noqa: BLE001
         return None

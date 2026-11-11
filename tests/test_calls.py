@@ -757,10 +757,10 @@ def test_register_adds_the_tool_and_its_skill():
     assert [tool["name"] for tool in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report",
                                                   "conduit_settings", "conduit_present", "conduit_show", "conduit_notify", "conduit_health",
                                                   "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar",
-                                                  "conduit_phone", "conduit_contacts", "conduit_room",
+                                                  "conduit_phone", "conduit_contacts", "conduit_photos", "conduit_room",
                                                   "conduit_ask_owner", "conduit_free_busy", "conduit_ask_linked",
                                                       "work_list", "work_start", "work_send", "work_stop", "work_read",
-                                                      "work_close", "work_ask", "work_reply", "work_note", "work_progress",
+                                                      "work_close", "work_ask", "work_reply", "work_note", "work_propose", "work_progress",
                                                       "conduit_room_work"]
     tool = tools[0]
     assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
@@ -797,10 +797,10 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
     plugin.register(ctx)
     assert [name for name, _ in tools] == ["conduit_call_user", "conduit_call_watch", "conduit_watch_report", "conduit_settings",
                                            "conduit_present", "conduit_show", "conduit_notify", "conduit_health", "conduit_inbox", "conduit_location", "conduit_maps", "conduit_calendar", "conduit_phone",
-                                           "conduit_contacts", "conduit_room", "conduit_ask_owner",
+                                           "conduit_contacts", "conduit_photos", "conduit_room", "conduit_ask_owner",
                                            "conduit_free_busy", "conduit_ask_linked", "work_list", "work_start",
                                            "work_send", "work_stop", "work_read", "work_close", "work_ask",
-                                           "work_reply", "work_note", "work_progress", "conduit_room_work"]
+                                           "work_reply", "work_note", "work_propose", "work_progress", "conduit_room_work"]
     handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.
@@ -969,6 +969,24 @@ def test_nothing_rings_during_a_live_voice_call(home, fake, paired):
     _reply(session_id="st-1", turn_id="t1", assistant_response="Done.")
     assert fake.sent == []
     assert [event["type"] for event in fake.enqueued] == ["response.ready"]
+
+
+def test_the_tool_says_at_once_that_a_user_in_a_call_wont_be_rung(home, fake, paired):
+    _settings(home)
+    calls._store(home).set_presence(90)
+    answer = _tool({"reason": "Done.", "asked_by_user": True})
+    assert answer["ok"] is False and answer["error"] == "in_call"
+    assert "won't ring" in answer["note"]
+    assert calls._store(home).watch_count() == 0, "nothing waits to ring after the call either"
+    calls._store(home).set_presence(0)
+    assert _tool({"reason": "Done.", "asked_by_user": True})["status"] == "call_at_turn_end"
+
+
+def test_an_unreadable_call_store_never_reads_as_a_call(home, monkeypatch):
+    def broken(home):
+        raise OSError("disk")
+    monkeypatch.setattr(calls, "_store", broken)
+    assert calls.in_call() is False
 
 
 def test_a_question_left_unanswered_calls_and_an_answer_stops_it(home, fake, clock, monkeypatch, paired):
@@ -1529,3 +1547,17 @@ def test_a_question_at_a_screen_rings_before_hermes_gives_up_on_it(home, fake, c
                     next_call=lambda args: "native")
     assert waits == [due]
 
+
+
+def test_the_plugins_own_work_update_isnt_at_a_screen_because_desktop_has_it_open(home, monkeypatch):
+    # .52, 2026-11-09: Hermes binds a work update to whichever client has the
+    # Bot Chat open, though none sent it.
+    _from(monkeypatch, None, DESKTOP)
+    monkeypatch.setattr(calls.chat_on_screen, "on_screen", lambda home, session: False)
+    assert calls._at_screen(home, ["st-1"]) is True
+    calls.turn_surface.expect_wake("Work update from your workstreams. ...")
+    calls.turn_surface.start_turn("st-1", "Work update from your workstreams. ...")
+    try:
+        assert calls._at_screen(home, ["st-1"]) is False
+    finally:
+        calls.turn_surface.start_turn("st-1")

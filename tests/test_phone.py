@@ -1,7 +1,9 @@
+import base64
 import importlib.util
 import json
 import os
 import pathlib
+from pathlib import Path
 import stat
 import sys
 import tempfile
@@ -284,7 +286,7 @@ def test_a_new_device_key_drops_the_device_data_and_the_same_key_keeps_it(store,
     fresh = Phone(DEVICE)
     fresh.accept(store.register_key(fresh.key_request()))
     status = store.status(DEVICE)["device"]
-    assert status["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0} and status["pending"] == 0
+    assert status["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0, "photos": 0} and status["pending"] == 0
     assert status["last_sync"] is None
     assert store.ingest(fresh.seal(_batch("batch-0003")))["events"] == 5
 
@@ -589,7 +591,7 @@ def test_calendar_off_and_reminders_off_forget_them(store, iphone):
     store.ingest(iphone.seal(_batch()))
     store.ingest(iphone.seal(_batch("batch-0002", sent_at="2026-10-14T08:05:00+01:00",
                                     sharing=_sharing(calendar="off", reminders=False))))
-    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0}
+    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0, "photos": 0}
     with pytest.raises(phone.PhoneError) as error:
         store.add_change("add_reminder", {"title": "Milk"})
     assert error.value.code == "nothing_shared"
@@ -798,7 +800,7 @@ def test_bad_batches_are_refused_whole(store, iphone, change, code):
     with pytest.raises(phone.PhoneError) as error:
         store.ingest(iphone.seal(batch))
     assert error.value.code == code
-    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0}
+    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0, "photos": 0}
 
 
 @pytest.mark.parametrize("change", [
@@ -848,13 +850,13 @@ def test_unshared_sections_are_dropped_unread(store, iphone):
     batch = _batch(sharing=_sharing(calendar="off", reminders=False, status=False, focus=False))
     batch["events"]["upsert"][0]["start"] = "garbage"
     store.ingest(iphone.seal(batch))
-    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0}
+    assert store.status(DEVICE)["device"]["counts"] == {"events": 0, "reminders": 0, "calendars": 0, "contacts": 0, "alarms": 0, "photos": 0}
 
 
 def test_status_carries_counts_never_content(store, iphone):
     store.ingest(iphone.seal(_batch()))
     status = store.status(DEVICE)
-    assert status["device"]["counts"] == {"events": 5, "reminders": 3, "calendars": 5, "contacts": 0, "alarms": 0}
+    assert status["device"]["counts"] == {"events": 5, "reminders": 3, "calendars": 5, "contacts": 0, "alarms": 0, "photos": 0}
     assert status["device"]["sharing"]["calendar"] == "full"
     assert "Dentist" not in json.dumps(status) and "Personal" not in json.dumps(status)
 
@@ -1926,6 +1928,8 @@ def test_voice_lists_alarms_and_contacts_reads_once_shared(client):
     tools = {item["name"]: item for item in client.http.get(f"{BASE}/voice-tools").json()["tools"]}
     assert tools["conduit_phone"]["parameters"]["properties"]["action"]["enum"] == ["alarms"]
     assert set(tools["conduit_contacts"]["parameters"]["properties"]) == {"action", "query"}
+    # A call only reads people; adding or changing contacts is the text tool's.
+    assert tools["conduit_contacts"]["parameters"]["properties"]["action"]["enum"] == ["people"]
     assert tools["conduit_contacts"]["key"] == "phone"
     alarms = _voice_read(client, handset, "conduit_phone", {"action": "alarms"})
     assert [alarm["id"] for alarm in alarms["alarms"]] == ["a_wake", "a_pasta"]
@@ -1951,3 +1955,492 @@ def test_every_change_kind_names_a_title_label_conduit_reads():
     for kind in store.CHANGE_KINDS:
         assert events._TITLE_LABEL.match(f"phone.{kind}"), kind
         assert events._TITLE_LABEL.match(f"phone.auto.{kind}"), kind
+
+
+# --- Shortcuts Hermes may run (0.159.0) -------------------------------------------
+
+SHORTCUTS = [{"name": "Movie night", "note": "Dims the lights and turns the TV on"},
+             {"name": "Log water"}, {"name": "movie NIGHT", "note": "a duplicate in another case"}]
+
+
+def _shortcut_batch(batch_id="batch-0001", sent_at="2026-10-14T08:00:00+01:00", **sharing):
+    return _batch(batch_id, sent_at=sent_at, sharing=_sharing(**{"shortcuts": True, **sharing}),
+                  shortcuts=SHORTCUTS)
+
+
+def test_shortcuts_land_once_per_name_and_are_forgotten_when_turned_off(store, iphone):
+    store.ingest(iphone.seal(_shortcut_batch()))
+    with store.reader("shortcuts") as (db, device):
+        listed, listed_at = store.shortcuts(db, device["id"])
+    assert listed == [{"name": "Movie night", "note": "Dims the lights and turns the TV on"}, {"name": "Log water"}]
+    assert listed_at == NOW
+    store.ingest(iphone.seal(_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", sharing=_sharing(),
+                                    shortcuts=SHORTCUTS)))
+    with store.reader("any") as (db, device):
+        assert store.shortcuts(db, device["id"]) == ([], None)
+
+
+def test_a_run_needs_a_listed_shortcut_and_its_result_comes_back(store, iphone):
+    store.ingest(iphone.seal(_shortcut_batch()))
+    with pytest.raises(phone.PhoneError) as raised:
+        store.add_change("run_shortcut", {"shortcut": "Unlock the door"})
+    assert raised.value.code == "unknown_shortcut"
+    change = store.add_change("run_shortcut", {"shortcut": "movie night", "input": "Dune"})
+    assert change["summary"] == "Run Movie night" and change["auto"] is False
+    # A run waits an hour, not a week.
+    assert change["expires_at"] == "2026-10-14T08:00:00Z"
+    [sent] = iphone.changes(store)
+    assert sent["kind"] == "run_shortcut" and sent["fields"] == {"shortcut": "Movie night", "input": "Dune"}
+    iphone.changes(store, [{"id": change["id"], "outcome": "applied", "result": "Lights at 20%\nTV on"}],
+                   call_id="call-00000002")
+    [outcome] = store.unreported_outcomes()
+    assert outcome["state"] == "applied" and outcome["result"] == "Lights at 20%\nTV on"
+    assert outcome["shortcut"] == "Movie night"
+    assert store.change_outcome(change["id"])["result"] == "Lights at 20%\nTV on"
+
+
+def test_a_too_long_shortcut_name_is_left_out_not_the_whole_list(store, iphone):
+    batch = _batch(sharing=_sharing(shortcuts=True),
+                   shortcuts=[{"name": "x" * (phone.MAX_SHORTCUT_NAME_CHARS + 1)},
+                              {"name": "x" * phone.MAX_SHORTCUT_NAME_CHARS + " "}, {"name": "Log water"}])
+    store.ingest(iphone.seal(batch))
+    with store.reader("shortcuts") as (db, device):
+        assert store.shortcuts(db, device["id"])[0] == [{"name": "Log water"}]
+
+
+def test_what_shortcuts_gave_back_fits_one_exchange_together(store, iphone):
+    store.ingest(iphone.seal(_shortcut_batch()))
+    runs = [store.add_change("run_shortcut", {"shortcut": "Log water"}) for _ in range(5)]
+    iphone.changes(store)
+    long = "y" * phone.MAX_RESULT_CHARS
+    iphone.changes(store, [{"id": run["id"], "outcome": "applied", "result": long} for run in runs],
+                   call_id="call-00000002")
+    given = [store.change_outcome(run["id"]).get("result") or "" for run in runs]
+    assert sum(len(text.encode()) for text in given) == phone.MAX_RESULTS_TEXT_BYTES
+    assert given[0] == long and given[-1] == ""
+    # Counted in bytes, never cutting a character in two.
+    store.ingest(iphone.seal(_shortcut_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
+    more = [store.add_change("run_shortcut", {"shortcut": "Log water"}) for _ in range(5)]
+    iphone.changes(store, call_id="call-00000003")
+    emoji = "🎬" * phone.MAX_RESULT_CHARS
+    iphone.changes(store, [{"id": run["id"], "outcome": "applied", "result": emoji} for run in more],
+                   call_id="call-00000004")
+    given = [store.change_outcome(run["id"]).get("result") or "" for run in more]
+    assert sum(len(text.encode()) for text in given) == phone.MAX_RESULTS_TEXT_BYTES
+    assert all(set(text) <= {"🎬"} for text in given)
+
+
+def test_running_without_asking_needs_shortcuts_and_turning_them_off_refuses_a_waiting_run(store, iphone):
+    store.ingest(iphone.seal(_batch(sharing=_sharing(shortcuts_auto=True), shortcuts=SHORTCUTS)))
+    with pytest.raises(phone.PhoneError):
+        store.add_change("run_shortcut", {"shortcut": "Log water"})
+    store.ingest(iphone.seal(_shortcut_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00",
+                                             shortcuts_auto=True)))
+    change = store.add_change("run_shortcut", {"shortcut": "Log water"})
+    assert change["auto"] is True
+    store.ingest(iphone.seal(_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", sharing=_sharing())))
+    assert iphone.changes(store) == []
+    assert store.changes()[0]["state"] == "failed"
+
+
+def test_a_version_3_store_gains_shortcuts_and_results(store, iphone):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    db = sqlite3.connect(store.path)
+    db.execute("ALTER TABLE devices DROP COLUMN shortcuts")
+    db.execute("ALTER TABLE devices DROP COLUMN shortcuts_at")
+    db.execute("ALTER TABLE changes DROP COLUMN result")
+    db.execute("UPDATE meta SET value='3' WHERE key='schema'")
+    db.commit()
+    db.close()
+    assert store.status(DEVICE)["device"]["counts"]["events"] == 5
+    store.ingest(iphone.seal(_shortcut_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
+    assert store.add_change("run_shortcut", {"shortcut": "Log water"})["summary"] == "Run Log water"
+
+
+def test_the_phone_tool_lists_and_runs_shortcuts_and_always_alerts(home):
+    store, handset = _shared(home, shortcuts=True, shortcuts_auto=True)
+    store.ingest(handset.seal(_shortcut_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00",
+                                              shortcuts_auto=True)))
+    listed = json.loads(tool.handle_phone({"action": "shortcuts"}, profile="work"))
+    assert [item["name"] for item in listed["shortcuts"]] == ["Movie night", "Log water"]
+    answer = json.loads(tool.handle_phone({"action": "run_shortcut", "shortcut": "Log water", "input": "500 ml"},
+                                          profile="work"))
+    assert answer["ok"] is True and answer["status"] == "queued" and "opens Conduit" in answer["note"]
+    # Even run without asking, it needs Conduit on screen: the push alerts.
+    assert home.sent[-1]["mode"] == "alert" and home.sent[-1]["title_label"] == "phone.auto.run_shortcut"
+    stray = json.loads(tool.handle_phone({"action": "run_shortcut", "shortcut": "Log water", "label": "x"},
+                                         profile="work"))
+    assert stray["ok"] is False and "label" in stray["note"]
+    missing = json.loads(tool.handle_phone({"action": "run_shortcut", "shortcut": "Nope"}, profile="work"))
+    assert missing["ok"] is False and missing["error"] == "unknown_shortcut"
+
+
+# --- Contact changes ---------------------------------------------------------------------
+
+
+def test_contact_changes_need_the_user_to_allow_them_and_a_picked_person(store, iphone):
+    store.ingest(iphone.seal(_phone_batch()))
+    with pytest.raises(phone.PhoneError) as raised:
+        store.add_change("add_contact", {"given_name": "Jo"})
+    assert raised.value.code == "nothing_shared"
+    store.ingest(iphone.seal(_phone_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", contacts_edit=True)))
+    added = store.add_change("add_contact", {"given_name": "Jo", "family_name": "Park", "relation": "dentist",
+                                             "phones": [{"number": "+1 555 0100", "label": "work"}]},
+                             )
+    # Never without asking, whatever else the user lets Hermes add.
+    assert added["summary"] == "Add Jo Park" and added["auto"] is False
+    with pytest.raises(phone.PhoneError) as raised:
+        store.add_change("update_contact", {"nickname": "S"}, {"contact_id": "p_nobody"})
+    assert raised.value.code == "unknown_contact"
+    # The note names the phone that allows edits, so the lookup can go there.
+    assert f"device {iphone.device_id}" in str(raised.value) and "people" in str(raised.value)
+    changed = store.add_change("update_contact", {"emails": []}, {"contact_id": "p_sam"})
+    assert changed["summary"] == "Change Sam Taylor"
+    deleted = store.add_change("delete_contact", None, {"contact_id": "p_alex"})
+    assert deleted["summary"] == "Delete Alex Kim"
+    sent = {change["kind"]: change for change in iphone.changes(store)}
+    assert sent["add_contact"]["fields"]["name"] == "Jo Park" and sent["add_contact"]["target"] is None
+    assert sent["update_contact"]["fields"] == {"emails": [], "name": "Sam Taylor"}
+    assert sent["delete_contact"]["fields"] == {"name": "Alex Kim"}
+    for fields, target in (({"shoe_size": 9}, None), ({}, None), ({"phones": [{"number": "call me"}]}, None),
+                           ({"nickname": "x"}, {"contact_id": "p_sam", "x": 1})):
+        with pytest.raises(phone.PhoneError):
+            store.add_change("add_contact" if target is None else "update_contact", fields, target)
+    with pytest.raises(phone.PhoneError):
+        store.add_change("delete_contact", {"name": "x"}, {"contact_id": "p_sam"})
+    # Editing is part of sharing them.
+    store.ingest(iphone.seal(_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00",
+                                    sharing=_sharing(contacts_edit=True))))
+    with pytest.raises(phone.PhoneError):
+        store.add_change("add_contact", {"given_name": "Jo"})
+
+
+def test_the_contacts_tool_asks_the_phone_to_add_change_and_delete(home):
+    store, handset = _shared(home, contacts=True, contacts_edit=True)
+    store.ingest(handset.seal(_phone_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", contacts_edit=True)))
+    added = json.loads(tool.handle_contacts({"action": "add", "given_name": "Jo", "reason": "From the email"},
+                                            profile="work"))
+    assert added["ok"] is True and added["status"] == "waiting_for_approval" and added["summary"] == "Add Jo"
+    assert home.sent[-1]["title_label"] == "phone.add_contact"
+    changed = json.loads(tool.handle_contacts({"action": "update", "contact_id": "p_sam", "nickname": "Sam"},
+                                              profile="work"))
+    assert changed["ok"] is True and changed["summary"] == "Change Sam Taylor"
+    stray = json.loads(tool.handle_contacts({"action": "delete", "contact_id": "p_sam", "nickname": "x"},
+                                            profile="work"))
+    assert stray["ok"] is False and "nickname" in stray["note"]
+    queried = json.loads(tool.handle_contacts({"action": "update", "contact_id": "p_sam", "query": "Sam",
+                                               "nickname": "Sammy"}, profile="work"))
+    assert queried["ok"] is False and "query" in queried["note"], "query is people's alone"
+    assert json.loads(tool.handle_contacts({"action": "add", "contact_id": "p_sam", "given_name": "x"},
+                                           profile="work"))["ok"] is False
+    # People still reads; voice keeps only people.
+    assert json.loads(tool.handle_contacts({"action": "people"}))["ok"] is True
+    # How they went reads here too, for a user who shares only contacts.
+    pending = json.loads(tool.handle_contacts({"action": "pending"}))
+    assert pending["ok"] is True and {change["kind"] for change in pending["changes"]} >= {"add_contact", "update_contact"}
+
+
+# --- Photos ---------------------------------------------------------------------------
+
+PHOTOS = [
+    {"id": "ph_beach", "at": "2026-08-02T18:30:00+01:00", "kind": "photo", "favorite": True,
+     "labels": ["beach", "sunset", "sky", "Beach"], "place": "Brighton", "w": 4032, "h": 3024},
+    {"id": "ph_receipt", "at": "2026-10-10T12:05:00+01:00", "kind": "photo",
+     "labels": ["receipt", "document"], "text": "Hardware Co. 2 umbrellas Total 23.40", "place": "London"},
+    {"id": "ph_shot", "at": "2026-10-12T09:00:00+01:00", "kind": "screenshot", "labels": ["text"],
+     "text": "Boarding pass LHR"},
+    {"id": "ph_dog", "at": "2026-10-13T08:00:00+01:00", "labels": ["dog", "beach"], "place": "Brighton"},
+]
+JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 64 + b"\xff\xd9"
+
+
+def _photo_batch(batch_id="batch-0001", sent_at="2026-10-14T08:00:00+01:00", photos=None, files=None,
+                 **sharing):
+    extra = {"photos": photos if photos is not None else {"full": True, "upsert": PHOTOS}}
+    if files is not None:
+        extra["photo_files"] = files
+    return _batch(batch_id, sent_at=sent_at, sharing=_sharing(**{"photos": True, **sharing}), **extra)
+
+
+def _search(store, **kw):
+    with store.reader("photos") as (db, device):
+        return store.photos(db, device["id"], **kw)
+
+
+def test_photos_land_rank_by_words_and_are_forgotten_when_turned_off(store, iphone):
+    answer = store.ingest(iphone.seal(_photo_batch()))
+    assert answer["photos"] == 4 and answer["skipped_photos"] == 0
+    found, matched = _search(store, query="beach")
+    # Both words beat one; then the newest first.
+    assert [photo["id"] for photo in found] == ["ph_dog", "ph_beach"] and matched == 2
+    assert [photo["id"] for photo in _search(store, query="dog beach")[0]] == ["ph_dog", "ph_beach"]
+    # Labels keep one of each, in any case.
+    assert found[1]["labels"] == ["beach", "sunset", "sky"] and found[1]["favorite"] is True
+    assert [photo["id"] for photo in _search(store, query="receipts hardware")[0]] == ["ph_receipt"]
+    assert [photo["id"] for photo in _search(store, query="screenshot")[0]] == ["ph_shot"]
+    assert [photo["id"] for photo in _search(store, favorites=True)[0]] == ["ph_beach"]
+    start = int(datetime(2026, 10, 11, tzinfo=timezone.utc).timestamp())
+    assert [photo["id"] for photo in _search(store, start=start)[0]] == ["ph_dog", "ph_shot"]
+    assert _search(store, query="giraffe") == ([], 0)
+    # Whole words only; a repeated word counts once; punctuation finds nothing.
+    assert _search(store, query="bea") == ([], 0)
+    assert [photo["id"] for photo in _search(store, query="beach beach beach dog")[0]] == ["ph_dog", "ph_beach"]
+    assert _search(store, query="!!! 🐶") == ([], 0)
+    # Singular finds plural and back.
+    assert [photo["id"] for photo in _search(store, query="beaches")[0]] == ["ph_dog", "ph_beach"]
+    assert [photo["id"] for photo in _search(store, query="umbrella")[0]] == ["ph_receipt"]
+    assert [photo["id"] for photo in _search(store, query="passes")[0]] == ["ph_shot"]
+    assert phone._word_forms("movies") >= {"movie", "movy"}
+    assert "flies" in phone._word_forms("fly") and "pony" in phone._word_forms("ponies")
+    assert "leaves" in phone._word_forms("leaf") and "leaf" in phone._word_forms("leaves")
+    assert "knives" in phone._word_forms("knife") and "knife" in phone._word_forms("knives")
+    assert "caves" not in phone._word_forms("cafe") and "cafe" not in phone._word_forms("caves")
+    # Text without spaces is searched inside, for any word.
+    store.ingest(iphone.seal(_photo_batch("batch-0001b", sent_at="2026-10-14T08:00:10+01:00", photos={
+        "upsert": [{"id": "ph_tokyo", "at": "2026-10-01T07:00:00+01:00", "text": "東京タワー合計2024円"}]})))
+    assert [photo["id"] for photo in _search(store, query="タワー")[0]] == ["ph_tokyo"]
+    assert [photo["id"] for photo in _search(store, query="2024")[0]] == ["ph_tokyo"]
+    # Half-width katakana too; one letter is only found as a word of its own.
+    store.ingest(iphone.seal(_photo_batch("batch-0001d", sent_at="2026-10-14T08:00:15+01:00", photos={
+        "upsert": [{"id": "ph_cafe", "at": "2026-10-02T07:00:00+01:00", "text": "ｶﾌｪABC x"}]})))
+    assert [photo["id"] for photo in _search(store, query="ｶﾌｪ")[0]] == ["ph_cafe"]
+    assert [photo["id"] for photo in _search(store, query="abc")[0]] == ["ph_cafe"]
+    assert _search(store, query="ｶ") == ([], 0)
+    assert _search(store, query="京") == ([], 0)
+    assert [photo["id"] for photo in _search(store, query="x")[0]] == ["ph_cafe"]
+    store.ingest(iphone.seal(_photo_batch("batch-0001e", sent_at="2026-10-14T08:00:18+01:00", photos={
+        "delete": ["ph_cafe"]})))
+    store.ingest(iphone.seal(_photo_batch("batch-0001c", sent_at="2026-10-14T08:00:20+01:00", photos={
+        "delete": ["ph_tokyo"]})))
+    assert store.status(DEVICE)["device"]["counts"]["photos"] == 4
+    # A diff deletes and upserts; a bad photo is left out, not the batch.
+    store.ingest(iphone.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={
+        "delete": ["ph_shot"], "upsert": [{"id": "ph_new", "at": "2026-10-14T07:00:00+01:00", "labels": ["cat"]},
+                                         {"id": "ph_bad", "at": "yesterday"}]})))
+    assert {photo["id"] for photo in _search(store)[0]} == {"ph_beach", "ph_receipt", "ph_dog", "ph_new"}
+    store.ingest(iphone.seal(_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", sharing=_sharing())))
+    assert store.status(DEVICE)["device"]["counts"]["photos"] == 0
+    # Sent while off, nothing is kept.
+    store.ingest(iphone.seal(_batch("batch-0004", sent_at="2026-10-14T08:03:00+01:00", sharing=_sharing(),
+                                    photos={"full": True, "upsert": PHOTOS})))
+    assert store.status(DEVICE)["device"]["counts"]["photos"] == 0
+
+
+def test_only_the_newest_photos_are_kept(store, iphone, monkeypatch):
+    monkeypatch.setattr(phone, "MAX_PHOTOS", 2)
+    store.ingest(iphone.seal(_photo_batch()))
+    assert {photo["id"] for photo in _search(store)[0]} == {"ph_dog", "ph_shot"}
+
+
+def test_a_photo_is_sent_only_by_its_picture_once_the_user_says_yes(store, iphone):
+    store.ingest(iphone.seal(_photo_batch(auto_add=True)))
+    with pytest.raises(phone.PhoneError) as raised:
+        store.add_change("send_photo", None, {"photo_id": "ph_nope"})
+    assert raised.value.code == "unknown_photo" and f"device {DEVICE}" in str(raised.value)
+    with pytest.raises(phone.PhoneError):
+        store.add_change("send_photo", {"x": 1}, {"photo_id": "ph_beach"})
+    change = store.add_change("send_photo", None, {"photo_id": "ph_beach"}, reason="The sunset you asked about")
+    # Never without asking, and a day at most.
+    assert change["auto"] is False and change["summary"] == "Send a photo from Sun 02 Aug 18:30 in Brighton"
+    assert phone.parse_time(change["expires_at"], "x").timestamp() == NOW + phone.PHOTO_TTL_S
+    [sent] = iphone.changes(store)
+    assert sent["target"] == {"photo_id": "ph_beach"}
+    assert sent["fields"] == {"taken": "2026-08-02T18:30:00+01:00", "place": "Brighton"}
+    # The phone's word alone doesn't send it.
+    iphone.changes(store, results=[{"id": change["id"], "outcome": "applied"}], call_id="call-00000002")
+    assert store.change_outcome(change["id"])["state"] == "pending"
+    # A picture for no waiting send is left out; a JPEG only.
+    other = {"change_id": "ch_" + "x" * 12, "data": base64.b64encode(JPEG).decode()}
+    answer = store.ingest(iphone.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00",
+                                                   photos={}, files=[other])))
+    assert "photos_sent" not in answer
+    with pytest.raises(phone.PhoneError):
+        store.ingest(iphone.seal(_photo_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", photos={},
+                                              files=[{"change_id": change["id"],
+                                                      "data": base64.b64encode(b"GIF89a").decode()}])))
+    answer = store.ingest(iphone.seal(_photo_batch(
+        "batch-0004", sent_at="2026-10-14T08:03:00+01:00", photos={},
+        files=[{"change_id": change["id"], "data": base64.b64encode(JPEG).decode()}])))
+    assert answer["photos_sent"] == [change["id"]]
+    outcome = store.change_outcome(change["id"])
+    path = Path(outcome["result"])
+    assert outcome["state"] == "applied" and path.read_bytes() == JPEG and path.parent.name == DEVICE
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == 0o600
+    view = next(item for item in store.changes() if item["id"] == change["id"])
+    assert view["result"] == str(path) and view["taken"] == "2026-08-02T18:30:00+01:00"
+    # Sent twice (a retry), it's kept once.
+    again = store.ingest(iphone.seal(_photo_batch(
+        "batch-0005", sent_at="2026-10-14T08:04:00+01:00", photos={},
+        files=[{"change_id": change["id"], "data": base64.b64encode(JPEG).decode()}])))
+    assert "photos_sent" not in again
+    # Photos turned off: the pictures go too, and when and where it was taken.
+    store.ingest(iphone.seal(_batch("batch-0006", sent_at="2026-10-14T08:05:00+01:00", sharing=_sharing())))
+    assert not path.exists()
+    view = next(item for item in store.changes() if item["id"] == change["id"])
+    assert "taken" not in view and "place" not in view and not view.get("result")
+
+
+def test_a_sent_photo_is_kept_a_week_and_goes_with_a_wipe(tmp_path, monkeypatch):
+    now = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: now[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_photo_batch()))
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    store.ingest(handset.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={},
+                                           files=[{"change_id": change["id"],
+                                                   "data": base64.b64encode(JPEG).decode()}])))
+    path = Path(store.change_outcome(change["id"])["result"])
+    os.utime(path, (NOW - phone.PHOTO_KEPT_S - 1,) * 2)
+    store.ingest(handset.seal(_photo_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", photos={})))
+    assert not path.exists()
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    store.ingest(handset.seal(_photo_batch("batch-0004", sent_at="2026-10-14T08:03:00+01:00", photos={},
+                                           files=[{"change_id": change["id"],
+                                                   "data": base64.b64encode(JPEG).decode()}])))
+    path = Path(store.change_outcome(change["id"])["result"])
+    assert path.exists()
+    store.wipe(DEVICE)
+    assert not path.exists() and not store.photos_dir(DEVICE).exists()
+
+
+def test_a_sent_photo_goes_without_another_upload_and_a_late_one_never_lands(tmp_path):
+    now = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: now[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_photo_batch()))
+
+    def send(batch_id, sent_at, change):
+        return store.ingest(handset.seal(_photo_batch(batch_id, sent_at=sent_at, photos={}, files=[
+            {"change_id": change["id"], "data": base64.b64encode(JPEG).decode()}])))
+
+    # Past its day, though nothing marked it expired yet: the picture isn't taken.
+    late = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    now[0] += phone.PHOTO_TTL_S + 1
+    answer = send("batch-0002", "2026-10-15T08:01:00+01:00", late)
+    assert "photos_sent" not in answer and store.change_outcome(late["id"])["state"] == "expired"
+    assert not store.photos_dir(DEVICE).exists() or not any(store.photos_dir(DEVICE).iterdir())
+
+    # A week on with no upload since: the phone's status check sweeps it.
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    send("batch-0003", "2026-10-15T08:02:00+01:00", change)
+    path = Path(store.change_outcome(change["id"])["result"])
+    os.utime(path, (now[0] - phone.PHOTO_KEPT_S - 1,) * 2)
+    now[0] += 5
+    store.status(DEVICE)
+    assert not path.exists()
+
+    # A batch refused for its clock that turns Photos off still takes the pictures.
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    send("batch-0004", "2026-10-15T08:03:00+01:00", change)
+    path = Path(store.change_outcome(change["id"])["result"])
+    with pytest.raises(phone.PhoneError) as error:
+        store.ingest(handset.seal(_batch("batch-0005", sent_at="2026-10-15T09:00:00+01:00",
+                                         sharing=_sharing(photos=False))))
+    assert error.value.code == "clock_skew"
+    assert not path.exists()
+
+
+def test_setting_the_phone_up_again_keeps_the_photos_it_sent(tmp_path):
+    now = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: now[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_photo_batch()))
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    store.ingest(handset.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={},
+                                           files=[{"change_id": change["id"],
+                                                   "data": base64.b64encode(JPEG).decode()}])))
+    path = Path(store.change_outcome(change["id"])["result"])
+    # A new key: no sharing until its first batch, so what it shared before decides.
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    now[0] += 5
+    store.status(DEVICE)
+    store.sweep_sent_photos()
+    assert path.exists()
+    # Its first batch says Photos is off: now they go.
+    store.ingest(handset.seal(_batch("batch-0003", sent_at="2026-10-14T08:02:00+01:00", sharing=_sharing())))
+    assert not path.exists()
+
+
+def test_a_fast_clock_on_a_phone_set_up_again_keeps_its_sent_photos(tmp_path):
+    now = [NOW]
+    store = phone.PhoneStore(tmp_path, clock=lambda: now[0])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    store.ingest(handset.seal(_photo_batch()))
+    change = store.add_change("send_photo", None, {"photo_id": "ph_dog"})
+    store.ingest(handset.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={},
+                                           files=[{"change_id": change["id"],
+                                                   "data": base64.b64encode(JPEG).decode()}])))
+    path = Path(store.change_outcome(change["id"])["result"])
+    handset = Phone()
+    handset.accept(store.register_key(handset.key_request()))
+    with pytest.raises(phone.PhoneError) as error:
+        store.ingest(handset.seal(_photo_batch("batch-0003", sent_at="2026-10-14T09:00:00+01:00", photos={})))
+    assert error.value.code == "clock_skew"
+    assert path.exists()
+    assert store.change_outcome(change["id"])["result"] == str(path)
+
+
+def test_narrowing_a_batch_that_names_no_window_keeps_none():
+    sharing = phone._parse_sharing(_sharing())
+    sharing["past_days"] = sharing["future_days"] = None
+    narrowed = phone._narrowed({**sharing, "past_days": 7, "future_days": 30}, sharing)
+    assert narrowed["past_days"] is None and narrowed["future_days"] is None
+    sharing["past_days"] = 14
+    assert phone._narrowed({**sharing, "past_days": 7}, sharing)["past_days"] == 7
+
+
+def test_a_dismissed_photo_never_arrives(store, iphone):
+    store.ingest(iphone.seal(_photo_batch()))
+    change = store.add_change("send_photo", None, {"photo_id": "ph_receipt"})
+    iphone.changes(store, results=[{"id": change["id"], "outcome": "dismissed"}])
+    answer = store.ingest(iphone.seal(_photo_batch(
+        "batch-0002", sent_at="2026-10-14T08:01:00+01:00", photos={},
+        files=[{"change_id": change["id"], "data": base64.b64encode(JPEG).decode()}])))
+    assert "photos_sent" not in answer and store.change_outcome(change["id"])["state"] == "dismissed"
+    assert not store.photos_dir(DEVICE).exists() or not any(store.photos_dir(DEVICE).iterdir())
+
+
+def test_a_version_4_store_gains_photos(store, iphone):
+    import sqlite3
+    store.ingest(iphone.seal(_batch()))
+    db = sqlite3.connect(store.path)
+    db.execute("DROP TABLE photos")
+    db.execute("UPDATE meta SET value='4' WHERE key='schema'")
+    db.commit()
+    db.close()
+    assert store.status(DEVICE)["device"]["counts"]["photos"] == 0
+    store.ingest(iphone.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
+    assert store.status(DEVICE)["device"]["counts"]["photos"] == 4
+
+
+def test_the_photos_tool_searches_and_asks_for_one(home):
+    assert tool.photos_available() is False
+    store, handset = _shared(home)
+    assert json.loads(tool.handle_photos({"action": "search"}))["error"] == "nothing_shared"
+    store.ingest(handset.seal(_photo_batch("batch-0002", sent_at="2026-10-14T08:01:00+01:00")))
+    assert tool.photos_available() is True
+    found = json.loads(tool.handle_photos({"action": "search", "query": "beach", "n": 1}))
+    assert [photo["id"] for photo in found["photos"]] == ["ph_dog"] and found["matched"] == 2
+    dated = json.loads(tool.handle_photos({"action": "search", "from": "2026-08-01", "to": "2026-08-02"}))
+    assert [photo["id"] for photo in dated["photos"]] == ["ph_beach"]
+    assert "other or fewer words" in json.loads(tool.handle_photos({"action": "search", "query": "giraffe"}))["note"]
+    assert json.loads(tool.handle_photos({"action": "search", "n": 99}))["ok"] is False
+    stray = json.loads(tool.handle_photos({"action": "search", "photo_id": "ph_dog"}))
+    assert stray["ok"] is False and "photo_id" in stray["note"]
+    asked = json.loads(tool.handle_photos({"action": "send", "photo_id": "ph_dog", "reason": "To check the dog"},
+                                          session_id="s1", profile="work"))
+    assert asked["ok"] is True and asked["status"] == "waiting_for_approval" and "only by tapping" in asked["note"]
+    assert home.sent[-1]["title_label"] == "phone.send_photo" and home.sent[-1]["mode"] == "alert"
+    missing = json.loads(tool.handle_photos({"action": "send", "photo_id": "ph_nope"}))
+    assert missing["ok"] is False and missing["error"] == "unknown_photo"
+    pending = json.loads(tool.handle_photos({"action": "pending"}))
+    assert pending["changes"][0]["kind"] == "send_photo" and "vision_analyze" in pending["note"]
+    refused = json.loads(tool.handle_photos({"action": "search"}, session_id="child", is_child=lambda s: True))
+    assert refused["error"] == "subagent"

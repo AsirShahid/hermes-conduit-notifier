@@ -20,6 +20,7 @@ from test_pulse_followup import CHAT, commitment, fake_redactor, followup, live 
 candidates = _load("conduit_push.pulse_candidates", ROOT / "pulse_candidates.py")
 learning = _load("conduit_push.pulse_learning", ROOT / "pulse_learning.py")
 prefs = _load("conduit_push.pulse_prefs", ROOT / "pulse_prefs.py")
+picks = pulse.pulse_picks
 
 DAY = 1_792_454_400.0  # 2026-10-20 00:00 UTC
 SINCE = "Mon 19 Oct 08:00"
@@ -97,7 +98,7 @@ def test_the_list_call_fences_its_context_and_names_the_bar():
     fence = re.search(r"<<<context (\w+)\n", seen["text"]).group(1)
     assert seen["text"].endswith(f"context {fence}>>>") and fence not in context.text
     assert seen["text"].startswith(f"Pulse report list. It covers {SINCE} onward.")
-    assert report.BARS["gentle"] in seen["instructions"] and "At most 5 in all." in seen["instructions"]
+    assert report.BARS["gentle"] in seen["instructions"] and "At most 5 in all, and none is fine. When unsure, leave it out." in seen["instructions"]
     assert ", ".join(report.FOUND_KINDS) in seen["instructions"] and "deadline" not in seen["instructions"]
     # The user's note to Pulse closes the instructions, when there is one.
     assert report.NOTE_TITLE not in seen["instructions"]
@@ -162,6 +163,31 @@ def test_found_candidates_need_a_line_and_say_where_they_came_from():
     # An unknown chat key, source and area name nothing; a wild value, a pick or a flag that isn't one count as none.
     assert (third["source"], third["area"], third["chat_id"], third["value"], third["bring_up"],
             third["actionable"]) == ("", "", "", None, False, None)
+
+
+def test_an_entry_with_a_line_keeps_its_pick_even_when_the_model_didnt_bring_it_up():
+    # What learning brings up anyway (pulse_candidates.route) is drawn from
+    # its pick, not left a plain card; an entry with no line has none.
+    def entry(**more):
+        return {"kind": "follow-up", "bring_up": False, "value": 4, "skip": "", "actionable": True,
+                "line": "Your Anker power bank's warranty ends Friday", "why": "From your order chat.",
+                "source": "chat", "chat": "c1", "area": "personal", "shape": "due",
+                "facts": {"due": "2026-11-13", "noticed": "2026-11-09"}, "actions": [], **more}
+
+    shown = [item(1)]
+    reply = {"remembered": [{"ref": 1, "bring_up": False, "value": 2, "skip": "", "line": "", "shape": "due",
+                             "facts": {"due": "2026-11-13", "noticed": "2026-11-09"}}],
+             "found": [entry()]}
+    rows = candidates.parse(reply, gathered(shown, chats={"c1": ("nahida", CHAT)}))
+    remembered, found = rows[0], rows[1]
+    assert not remembered.get("pick")
+    pick = picks.loads(found["pick"])
+    assert (pick["shape"], pick["facts"]["due"], pick["line"]) == (
+        "due", "2026-11-13", "Your Anker power bank's warranty ends Friday")
+
+
+def test_the_list_asks_for_a_pick_on_every_entry_with_a_line():
+    assert 'Every entry with a "line" is also a pick, "bring_up" true or not' in candidates.INSTRUCTIONS
 
 
 @pytest.mark.parametrize("value, expected", [(3, 3), (3.6, 4), ("5", 5), (0, None), (6, None), (True, None),
@@ -468,7 +494,8 @@ def deliver(live, text, reply):
 
 FOUND = {"kind": "follow-up", "bring_up": True, "value": 4, "skip": "", "actionable": True,
          "line": "Look at the flaky deploy (you asked in Deploy)",
-         "why": "You asked about it in Deploy and nothing has been done since.", "source": "chat", "chat": "c1", "area": "work"}
+         "why": "You asked about it in Deploy and nothing has been done since.", "source": "chat", "chat": "c1", "area": "work",
+         "shape": "promise", "facts": {"said": "look at the flaky deploy"}}
 
 
 @pytest.mark.parametrize("slot", [None, {"provider": "openrouter", "model": "google/gemini-flash"}])
@@ -497,6 +524,7 @@ def test_a_report_lists_its_candidates_then_says_what_code_picked(reporting):
     live.llm.replies.append({
         "remembered": [{"ref": item_id, "bring_up": True, "value": 3, "skip": "", "actionable": True,
                         "line": "Renew your passport before the trip (you said so in Deploy)",
+                        "shape": "due", "facts": {"due": "2026-10-30"},
                         "why": "You promised it in Deploy and the trip is in three days."}],
         "found": [FOUND, {**FOUND, "kind": "fact", "bring_up": False, "value": 1, "skip": "minor",
                           "line": "Your sister is Ana"}]})
@@ -675,7 +703,8 @@ def test_typed_ratings_of_a_list_report_still_name_its_remembered_picks(reportin
     item_id = commitment(live, due="2026-10-30", due_at=now + 3 * 86400)
     live.store.set("memory", True)
     live.llm.replies.append({"remembered": [{"ref": item_id, "bring_up": True, "value": 3, "skip": "",
-                                             "line": "Renew your passport"}], "found": []})
+                                             "line": "Renew your passport", "shape": "due",
+                                             "facts": {"due": "2026-10-30"}}], "found": []})
     listed(live, now)
     pulse.tick(now + 1)
     [sent] = live.sent()
@@ -1046,6 +1075,49 @@ def test_candidates_command_brings_one_up(live, monkeypatch, capsys):
 
 
 
+def test_what_fits_no_card_type_stays_out_unless_asked_for_or_a_floor(live):
+    # Eric, 2026-11-10: fewer cards worth reading beat showing what fits no type.
+    now = time.time()
+    picks = pulse.pulse_picks
+
+    def pick(**entry):
+        made, why = picks.parse({"line": "x", **entry})
+        return picks.dumps({**made, **({"dropped": why} if why else {})})  # as with_pick keeps it
+
+    rows = [candidate(text="Backup is failing", pick=pick(shape="status", facts={"label": "Backup", "state": "fail"})),
+            candidate(text="You like tea", pick=pick()),
+            candidate(text="Call the bank, as you asked", pick=pick(), asked=True),
+            candidate(text="A bad date", pick=pick(shape="date", facts={"day": "soon"})),
+            candidate(text="Send the deck", kind="commitment", pick=pick(), due_at=now + 3600)]  # a floor
+    candidates.decide(live.store, rows, now=now)
+    assert [(row["decision"], row["skip"]) for row in rows] == [
+        (candidates.SURFACED, ""), (candidates.SKIPPED, candidates.SHAPELESS), (candidates.SURFACED, ""),
+        (candidates.SKIPPED, candidates.SHAPELESS), (candidates.SURFACED, "")]
+    [day] = live.store.get(picks.PICK_COUNTS).values()
+    assert day["left_out:plain"] == 2 and day["left_out:plain:bad_day"] == 1
+
+
+def test_a_plain_pick_stays_in_when_asked_for_in_memory_or_about_an_open_card_and_never_beats_its_shaped_double(live):
+    now = time.time()
+    picks = pulse.pulse_picks
+    [old] = live.store.add_cards([{"kind": store.NOTICED, "item_id": None, "level": "screen", "title": "Audit failed",
+                                   "news": "Audit failed", "why": "", "created_at": now - 3600,
+                                   "subject": "job:default:41", "topic": "other"}])
+    plain = lambda **entry: picks.dumps(picks.parse({"line": "x", **entry})[0])
+    watch = candidate(text="The price dropped", kind="watch", origin=candidates.MEMORY, item_id=1, pick=plain())
+    closing = candidate(text="Audit recovered", subject="job:default:41",
+                        pick=plain(subject="job:default:41", incident={"close": f"pc_{old}"}))
+    # Two about one calendar entry: the plain one valued higher, the shaped one kept.
+    loose = candidate(text="Dentist soon", ref="event:v1", value=5, pick=plain())
+    shaped = candidate(text="Dentist on Friday", ref="event:v1", value=4,
+                       pick=plain(shape="status", facts={"label": "Dentist", "state": "warn"}))
+    rows = [watch, closing, loose, shaped]
+    candidates.decide(live.store, rows, now=now)
+    assert [(row["decision"], row["skip"]) for row in rows] == [
+        (candidates.SURFACED, ""), (candidates.SURFACED, ""), (candidates.SKIPPED, candidates.SHAPELESS),
+        (candidates.SURFACED, "")]
+
+
 def test_decide_lets_a_new_incident_through_when_the_same_list_closes_its_card(live):
     now = time.time()
     [old] = live.store.add_cards([{"kind": store.NOTICED, "item_id": None, "level": "screen", "title": "Audit failed",
@@ -1053,7 +1125,9 @@ def test_decide_lets_a_new_incident_through_when_the_same_list_closes_its_card(l
                                    "subject": "job:default:41", "topic": "other"}])
     picks = pulse.pulse_picks
     again = candidate(text="Audit failed again", subject="job:default:41",
-                      pick=picks.dumps(picks.parse({"line": "Audit failed again", "subject": "job:default:41"})[0]))
+                      pick=picks.dumps(picks.parse({
+                          "line": "Audit failed again", "subject": "job:default:41", "shape": "status",
+                          "facts": {"label": "Audit", "state": "fail"}})[0]))
     closing = candidate(text="Audit recovered", subject="job:default:41", pick=picks.dumps(picks.parse(
         {"line": "Audit recovered", "subject": "job:default:41", "incident": {"close": f"pc_{old}"}})[0]))
     rows = [again, closing]
