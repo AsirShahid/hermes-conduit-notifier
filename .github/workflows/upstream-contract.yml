@@ -157,6 +157,12 @@ jobs:
           REFS: ${{ needs.refs.outputs.refs }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
+          # A fork with Issues turned off can't hold upstream-break issues; the red
+          # contract job is its alert.
+          if [ "$(gh api "repos/$GH_REPO" --jq .has_issues)" != true ]; then
+            echo "::notice::Issues are off in $GH_REPO, so no upstream-break issue is filed."
+            exit 0
+          fi
           gh label create upstream-break --color B60205 \
             --description "A Hermes change breaks the plugin's contract (upstream/contract.yml)" 2>/dev/null || true
           declare -A reported

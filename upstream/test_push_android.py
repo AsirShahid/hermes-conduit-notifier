@@ -2,6 +2,14 @@
 
 The endpoint is deliberately unreachable and these tests send no push event.
 They exercise the installed plugin, not a monkeypatched API router.
+
+The file name matters. This test uses the session-wide `dashboard`, which holds
+Hermes' machine host lease until the session ends. test_bot_work.py,
+test_compaction_skip.py and test_cron_bot_chat.py start their own backends and
+must run before that lease is taken, as they do upstream (the first `dashboard`
+user there is test_gateway_listener.py). Named test_android_push.py, this ran
+first and every one of their cases failed with "Refusing to start: this host is
+already served".
 """
 import base64
 import json
