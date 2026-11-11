@@ -1,6 +1,6 @@
 # Hermes Conduit Notifier
 
-This is the Android companion fork for [AsirShahid/hermes-conduit](https://github.com/AsirShahid/hermes-conduit/tree/android), based on upstream 0.151.0. Android delivery is adapted from [scasellas/hermes-conduit-notifier-Android](https://github.com/scasellas/hermes-conduit-notifier-Android/tree/android-unifiedpush) at `68c90e7`. Existing Apple routes remain available.
+This is the Android companion fork for [AsirShahid/hermes-conduit](https://github.com/AsirShahid/hermes-conduit/tree/android), based on upstream 0.162.0. Android delivery is adapted from [scasellas/hermes-conduit-notifier-Android](https://github.com/scasellas/hermes-conduit-notifier-Android/tree/android-unifiedpush) at `68c90e7`. Existing Apple routes remain available.
 
 For this fork, read [ANDROID.md](ANDROID.md) before installing or updating. The upstream installation instructions below describe the Apple project and do not select this Android branch.
 
