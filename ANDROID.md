@@ -2,7 +2,7 @@
 
 Source: `AsirShahid/hermes-conduit-notifier`, branch `android`. The phone app is `AsirShahid/hermes-conduit`, branch `android`.
 
-## Differences from upstream 0.151.0
+## Differences from upstream 0.162.0
 
 - Authenticated, profile-scoped `/push/android/register` and `/push/android/unregister`. Registration stores endpoints and per-phone secrets in an owner-only file. Status returns no endpoint or secret.
 - UnifiedPush delivery retains the app's existing E2E protocol and optional RFC 8291 Web Push encryption. The Apple relay receives no Android endpoint or Android key.
