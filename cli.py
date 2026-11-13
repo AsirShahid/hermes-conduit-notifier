@@ -35,6 +35,13 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
         help="Send an encrypted test push with a broken ciphertext; the phone must show only generic text",
     )
     commands.add_parser("unpair", help="Revoke this profile's relay credential")
+    say = commands.add_parser(
+        "say",
+        help="Post a script's message into this profile's Bot Chat and push it (for scripts that can't wait "
+             "for their job's run to end, like a Duo number)",
+    )
+    say.add_argument("text", nargs="?", default=None, help="The message; read from stdin when left out")
+    say.add_argument("--title", default="Hermes", help="What the note and the notification are titled")
     redact = commands.add_parser(
         "redact",
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
@@ -301,6 +308,19 @@ def dispatch(args: argparse.Namespace) -> int:
         else:
             print("End-to-end encryption: off (open Conduit > Settings > Notifications to turn it on)")
         print(f"State: {state_path()}")
+        return 0
+    if action == "say":
+        from . import cron_bot_chat
+
+        text = args.text if args.text is not None else sys.stdin.read()
+        if not text.strip():
+            print("Nothing to say: give the message as an argument or on stdin.")
+            return 1
+        error = cron_bot_chat.say(text.strip(), str(args.title or "Hermes"))
+        if error:
+            print(f"Not posted to the Bot Chat: {error}")
+            return 1
+        print("Posted to the Bot Chat.")
         return 0
     if action == "test":
         event = push_event(

@@ -92,6 +92,9 @@ hermes conduit-push status
 # Send a local test event through the relay
 hermes conduit-push test
 
+# From a script: post a message into the Bot Chat and push it
+hermes conduit-push say --title "CSC login" "Duo code 482"
+
 # Redact chat text from pushes (see Privacy and security)
 hermes conduit-push redact on
 
@@ -158,6 +161,8 @@ The plugin tells a cron run by its task id (`cron:<job id>:…`) or its classic 
 ### Cron jobs delivered to a Bot Chat
 
 Hermes delivers a job set to `deliver: bot-chat` (or `bot-chat:<profile>`) as a turn: the bot reads the report, acts on what needs action and summarizes it, a model call every run. With the plugin, such a job **just shows its report** in that bot's Bot Chat instead: it's written into the chat as a note, the way Hermes writes a cron result into a local chat, with no turn and no model call, and the bot sees it as context on its next turn. Pick **Let the bot act on it** for a job in Conduit's job editor to keep Hermes' turn for it. The choice is kept in the job's profile's `conduit-cron.json` beside the muted jobs: `GET /api/plugins/conduit_push/cron/notifications` lists the jobs that let the bot act under `act`, and `PUT` with `{"job_id": "...", "act": true}` changes one. Capability `cron-bot-chat-reports`; the route's `shows_reports` says whether this Hermes can write the note (Hermes v0.22.5 can't, its canary from late October can), and without it every job keeps Hermes' turn and Conduit offers no choice. A report shows only in a Bot Chat that exists. A picture or file the report delivers on a line of its own (`MEDIA:/path`) is written as `@image:/path` or `@file:/path`, which Hermes Desktop and Conduit show in a note as the picture or the file, and the Artifacts list shows as the run's deliveries; a tag inside a sentence or in a code block stays as written.
+
+A script-only job (`no_agent`) runs no turn, so no turn's end notifies about its report. Its Bot Chat report therefore sends a notification of its own (plugin 0.162.2+), titled with the job's name, its report the body, replacing the job's last one. A muted job, a silent report and another profile's Bot Chat send none. A script that can't wait for its run to end (a Duo number to match, say) posts with `hermes conduit-push say --title <title> [text]` (text on stdin when left out): the message shows in this profile's Bot Chat as a report titled `<title>` and pushes the same way.
 
 Beside notifications, the plugin keeps a Live Activity up to date while a turn you sent from Conduit runs (see [Lock Screen progress](#lock-screen-progress-plugin-032)).
 

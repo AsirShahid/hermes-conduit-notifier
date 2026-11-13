@@ -290,3 +290,96 @@ def test_markers_directives_and_quote_marks_keep_the_reference_whole():
         "@image:`/tmp/Bob's photo.png`",
         "@image:`/tmp/old<1>.png`",
     ]
+
+
+@pytest.fixture
+def pushes(hermes, monkeypatch):
+    """The relay, as push_report reaches it: what was sent, and whether the pairing is paused."""
+    sent = types.SimpleNamespace(events=[], paused=False, fails=False)
+
+    def send_now(event, timeout=15.0):
+        if sent.fails:
+            raise RuntimeError("relay unreachable")
+        sent.events.append(event)
+        return {"accepted": True}
+
+    _module(monkeypatch, "conduit_push.client", send_now=send_now, notifications_paused=lambda: sent.paused)
+    _module(monkeypatch, "conduit_push.session_titles", bot_name=lambda: "")
+    # cron_runs binds Hermes' home when first imported: this test's home, whichever test came first.
+    cron_runs = importlib.import_module("conduit_push.cron_runs")
+    monkeypatch.setattr(cron_runs, "get_hermes_home", lambda: hermes.home)
+    return sent
+
+
+def test_a_script_jobs_report_also_pushes_titled_with_its_name(hermes, pushes):
+    assert cron_bot_chat.install()
+    job = dict(JOB, no_agent=True)
+    assert hermes.delivery.deliver(job, "Rain at 9. sk-secret\nMEDIA:/tmp/chart.png", "") is None
+    assert len(hermes.notes) == 1
+    (event,) = pushes.events
+    assert event["type"] == "response.ready" and event["session_id"] == "bot-chat-tip"
+    assert event["title"] == event["headline"] == event["session_title"] == "Morning 'news'"
+    assert "Rain at 9. [REDACTED]" in event["body"] and "sk-secret" not in event["body"]
+    assert "/tmp/" not in event["body"] and "chart.png" in event["body"]
+    assert event["slot"]
+
+
+def test_a_script_jobs_failure_push_says_it_failed(hermes, pushes):
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB, no_agent=True), "Script exited 1.", "", for_failure=True) is None
+    (event,) = pushes.events
+    assert event["title"] == "Morning 'news' failed"
+
+
+def test_an_agent_jobs_report_pushes_nothing_here_since_its_turn_did(hermes, pushes):
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "") is None
+    assert len(hermes.notes) == 1 and pushes.events == []
+
+
+def test_muted_silent_paused_and_another_profiles_reports_push_nothing(hermes, pushes, monkeypatch):
+    assert cron_bot_chat.install()
+    job = dict(JOB, no_agent=True)
+    CronStore(hermes.home).set_notify(JOB["id"], False)
+    assert hermes.delivery.deliver(dict(job), "Rain at 9.", "") is None
+    CronStore(hermes.home).set_notify(JOB["id"], True)
+    note = cron_bot_chat.note_text(job, "[SILENT]")
+    assert not cron_bot_chat.push_report(job, hermes.home, "bot-chat-tip", note, "k", False)
+    pushes.paused = True
+    assert hermes.delivery.deliver(dict(job), "Rain at 9.", "") is None
+    pushes.paused = False
+    hermes.owned = False
+    monkeypatch.setattr(cron_bot_chat.time, "sleep", lambda seconds: None)
+    assert hermes.delivery.deliver(dict(job), "Rain at 9.", "furina") is None
+    assert pushes.events == []
+
+
+def test_a_push_that_fails_never_fails_the_delivery(hermes, pushes):
+    assert cron_bot_chat.install()
+    pushes.fails = True
+    job = dict(JOB, no_agent=True)
+    assert hermes.delivery.deliver(job, "Rain at 9.", "") is None
+    assert len(hermes.notes) == 1 and job["_bot_chat_delivery_receipts"]["bot-chat:(own)"]["status"] == "shown"
+
+
+def test_a_script_says_something_into_the_bot_chat_and_it_pushes(hermes, pushes, monkeypatch):
+    hermes.owned = False  # `hermes conduit-push say` runs outside the chat's owner
+    monkeypatch.setattr(cron_bot_chat.time, "sleep", lambda seconds: None)
+    assert cron_bot_chat.say("Duo code 482. sk-secret", "CSC login") is None
+    (chat, _key, text, kind, _metadata), = hermes.written
+    assert chat == "bot-chat-tip" and kind == "internal_notification"
+    assert text.startswith('[Cron job "CSC login" report:') and text.endswith("Duo code 482. [REDACTED]")
+    (event,) = pushes.events
+    assert event["title"] == "CSC login" and "Duo code 482" in event["body"] and "sk-secret" not in event["body"]
+
+
+def test_saying_something_with_no_bot_chat_says_why_and_pushes_nothing(hermes, pushes):
+    hermes.chat = None
+    assert "no Bot Chat" in cron_bot_chat.say("Duo code 482", "CSC login")
+    assert pushes.events == [] and hermes.written == [] and hermes.notes == []
+
+
+def test_a_push_that_fails_still_leaves_what_a_script_said(hermes, pushes):
+    pushes.fails = True
+    assert cron_bot_chat.say("Duo code 482", "CSC login") is None
+    assert len(hermes.notes) == 1 and pushes.events == []

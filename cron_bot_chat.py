@@ -249,10 +249,114 @@ def show(job: dict, content: str, profile: str, *, for_failure: bool = False,
         if error is None:
             job.setdefault("_bot_chat_delivery_receipts", {})[target] = {"status": "shown", "delivery_id": key}
             logger.info("Job '%s': report shown in the %s Bot Chat (no turn)", job.get("id", "?"), profile or "own")
+            push_report(job, home, chat, text, key, for_failure)
         return error
     except Exception as exc:  # noqa: BLE001 - reported to Hermes as its own delivery reports a failure
         logger.warning("conduit_push: cron report to %s failed", target, exc_info=True)
         return f"{target} report not shown: {exc!r}"
+
+
+_NOTE_NAME = re.compile(r'\A\[Cron job "(?P<name>.*)" report: ')
+
+
+def push_report(job: dict, home: Path, chat: str, note: str, key: str, for_failure: bool,
+                send: Optional[Callable[..., Any]] = None) -> bool:
+    """A script-only job (``no_agent``) runs no turn, so no turn's end
+    pushes its report the way an agent job's run does: shown in the Bot
+    Chat and nowhere else, it would wait there unseen. It pushes here
+    instead, titled with the job's name and replacing the job's last
+    notification, and sent before the run's short-lived worker exits. An
+    agent job (its own turn pushes), a muted job, a silent report, another
+    profile's Bot Chat (its pairing is that profile's) and a paused
+    pairing send nothing, and a push that fails never fails the delivery.
+    True when it went to the relay."""
+    try:
+        if not job.get("no_agent"):
+            return False
+        from . import cron_runs
+        from .cron_store import valid_job_id
+
+        job_id = valid_job_id(job.get("id")) or ""
+        if job_id and cron_runs.muted(job_id):
+            return False
+        return _push_note(home, chat, note, key, failed=for_failure, job_id=job_id, send=send)
+    except Exception:  # noqa: BLE001 - the note is written; a failed push never fails the delivery
+        logger.warning("conduit_push: couldn't push job %s's Bot Chat report", job.get("id", "?"), exc_info=True)
+        return False
+
+
+def _push_note(home: Path, chat: str, note: str, key: str, *, failed: bool = False, job_id: str = "",
+               send: Optional[Callable[..., Any]] = None) -> bool:
+    """A Bot Chat note's push: titled with the name its header carries
+    (redacted, not the raw one), its text the body. Nothing for another
+    profile's Bot Chat, a silent note or a paused pairing. Raises on a
+    send that fails; the callers decide what that costs."""
+    from hermes_constants import get_hermes_home
+
+    own = Path(get_hermes_home()).resolve()
+    if Path(home).resolve() != own:
+        return False
+    from . import client, cron_runs
+    from .events import event_id, plain_text, push_event
+    from .session_titles import bot_name
+
+    header, _, body = note.partition("\n\n")
+    if not body.strip() or cron_runs.is_silent(body):
+        return False
+    if client.notifications_paused():
+        return False
+    match = _NOTE_NAME.match(header)
+    name = match.group("name") if match else (job_id or "Scheduled job")
+    title = f"{name} failed" if failed else name
+    # The note's picture and file references read as the attachment's
+    # name in a push, never the host path: back to MEDIA tags for plain_text.
+    shown = re.sub(r"(?m)^@(?:image|file):(.+)$", lambda m: "MEDIA:" + m.group(1).strip("`\"'"), body)
+    import hermes_constants
+
+    namer = getattr(hermes_constants, "profile_name_for_home", None)
+    named = namer(own) if callable(namer) else None
+    profile = named if isinstance(named, str) and named else "default"
+    event = push_event(
+        "response.ready",
+        identifier=event_id("cron-report", key),
+        session_id=chat,
+        profile=profile,
+        profile_name=bot_name(),
+        title=title,
+        title_label="response.ready",
+        session_title=title,
+        body=plain_text(shown),
+        headline=title,
+        slot=f"cron:{profile}:{job_id}" if job_id else "",
+    )
+    (send or client.send_now)(event, timeout=15.0)
+    logger.info("conduit_push: Bot Chat note '%s' pushed to Conduit", title)
+    return True
+
+
+def say(text: str, title: str, *, send: Optional[Callable[..., Any]] = None) -> Optional[str]:
+    """A message from a script that can't wait for its job's run to end
+    (a Duo number to match, a check stuck for hours): written into this
+    profile's Bot Chat as a note titled ``title``, as a job's report is,
+    and pushed. None once the note is written (a push that fails is only
+    logged), else why it wasn't."""
+    from hermes_constants import get_hermes_home
+
+    home = Path(get_hermes_home()).resolve()
+    chat = _bot_chat(home)
+    if not chat:
+        return "no Bot Chat yet, so the message has nowhere to show"
+    note = note_text({"name": title or "Hermes"}, text)
+    key = f"conduit-say:{time.time_ns()}"
+    error = _note_from_here(home, chat, note, False) if _owned_here(home) else "its owner runs elsewhere"
+    if error is not None:
+        error = _note_from_elsewhere(home, chat, note, key, False)
+    if error is None:
+        try:
+            _push_note(home, chat, note, key, send=send)
+        except Exception:  # noqa: BLE001 - the note is written; the push is best effort
+            logger.warning("conduit_push: couldn't push the Bot Chat message '%s'", title, exc_info=True)
+    return error
 
 
 def _owned_here(home: Path) -> bool:

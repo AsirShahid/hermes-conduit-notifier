@@ -13,6 +13,14 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.162.2 (2026-11-13)
+
+### Fixes
+- A script-only scheduled job delivered to the Bot Chat now sends a notification with its report, titled with the job's name. Before, its report showed in the Bot Chat with no notification, so an alert from such a job went unseen.
+
+### New and improved
+- Scripts can post a message into the Bot Chat with a notification: `hermes conduit-push say --title <title> <text>`. Useful for something that can't wait for a job's run to end, like a Duo number.
+
 ## 0.162.1 (2026-11-11)
 
 ### Fixes
