@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.164.0 (2026-11-15)
+
+### New and improved
+- Conduit's crash and freeze reports can come straight to this host instead of waiting for you to review and share them. Repeats of one problem are grouped, and a scheduled Hermes job can investigate each new one and queue a fix.
+
 ## 0.163.0 (2026-11-15)
 
 ### New and improved

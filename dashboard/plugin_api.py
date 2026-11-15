@@ -13,6 +13,8 @@ they run:
                           remembers, and the profile's SOUL.md
     hermes_config         The Hermes page: built-in memory entries, OpenViking,
                           the profile's Hermes files
+    device_reports        Conduit's crash and freeze reports, kept for automatic
+                          triage
     gpt_live              GPT-Live on a ChatGPT/Codex subscription, or on this
                           host's OpenAI key
     grok_live             Grok Live: Conduit's realtime socket relayed to xAI

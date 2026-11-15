@@ -814,6 +814,23 @@ goes through the workspace file routes, which keep refusing `.env`,
 `config.yaml` and credential files. Every route is capped at 120 requests per
 minute per profile and takes `?profile=<name>`.
 
+## Device reports
+
+Conduit sends each crash, ANR and foreground stall it records to this host on its own (capability `device-reports`),
+instead of offering a review and a share. Nothing goes to a relay.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| POST | `/api/plugins/conduit_push/device-reports` with the report Conduit records | `{ok, id, signature, new, status}` |
+
+Reports are grouped into problems by a signature that survives code moving: kind, termination reason, exception class
+and the first three Conduit frames, without line numbers. `conduit-device-reports/index.json` under the default Hermes
+home holds each problem (`title`, `status`, `count`, `builds`, `first_seen`, `last_seen`, its last five report ids,
+`note`), and `reports/` the raw reports (the newest 300). Statuses are `new`, `investigating`, `queued` (a fix waits
+for a build), `fixed` and `ignored`. A report of a `queued` or `fixed` problem from a build newer than
+`fixed_after_build` reopens it as `new` with `generation` raised, so a fix that didn't hold comes back. Capped at 30
+reports a minute; a body over 24,000 bytes is refused (413).
+
 ## Personality for voice
 
 Conduit's voice modes can keep the agent's personality without reading stage

@@ -19,6 +19,7 @@ MODULES = (
     "gemini_qwen_live",
     "memory",
     "hermes_config",
+    "device_reports",
     "gpt_live",
     "grok_live",
     "speech_server",

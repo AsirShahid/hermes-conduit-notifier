@@ -506,6 +506,7 @@ routes:
   - PUT /conduit-settings
   - GET /cron/notifications
   - PUT /cron/notifications
+  - POST /device-reports
   - GET /e2e
   - POST /e2e
   - POST /e2e/rotate
