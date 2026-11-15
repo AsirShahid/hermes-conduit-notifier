@@ -232,6 +232,12 @@ def show(job: dict, content: str, profile: str, *, for_failure: bool = False,
             job["_notification_all_targets_suppressed"] = True
             return None
         chat = _bot_chat(home)
+        if not profile:
+            # A job filed under a topic shows in that topic's chat (cron_topics); anything that
+            # doesn't resolve keeps the Bot Chat.
+            from .cron_topics import topic_chat
+
+            chat = topic_chat(home, job.get("id")) or chat
         if not chat:
             return f"{target}: no Bot Chat yet, so the report has nowhere to show"
         text = note_text(job, content)

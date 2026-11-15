@@ -37,7 +37,7 @@ def hermes(monkeypatch, tmp_path):
         package.__path__ = []
         monkeypatch.setitem(sys.modules, name, package)
     calls = types.SimpleNamespace(turns=[], notes=[], written=[], owned=True, warnings=True, refusals=0,
-                                  local_refuses=False, chat="bot-chat-tip")
+                                  local_refuses=False, chat="bot-chat-tip", sessions={})
 
     def _deliver_to_bot_chat(job, content, profile, *, for_failure=False):
         calls.turns.append((job["id"], content, profile, for_failure))
@@ -76,6 +76,9 @@ def hermes(monkeypatch, tmp_path):
                 raise RuntimeError("active_turn")
             calls.written.append((session_id, admission_id, content, display_kind, metadata))
             return 1
+
+        def get_session(self, session_id):
+            return calls.sessions.get(session_id)
 
         def close(self):
             pass
@@ -383,3 +386,60 @@ def test_a_push_that_fails_still_leaves_what_a_script_said(hermes, pushes):
     pushes.fails = True
     assert cron_bot_chat.say("Duo code 482", "CSC login") is None
     assert len(hermes.notes) == 1 and pushes.events == []
+
+
+# Topic chats: a job the user filed under a topic shows its report in that topic's chat instead of
+# the Bot Chat (conduit-cron-topics.json beside the pairing state: {"jobs": {id: topic}, "chats": {topic: id}}).
+
+def _topics(home, jobs, chats):
+    import json
+
+    (home / "conduit-cron-topics.json").write_text(json.dumps({"jobs": jobs, "chats": chats}), encoding="utf-8")
+
+
+def test_a_job_filed_under_a_topic_shows_its_report_in_that_topics_chat(hermes):
+    _topics(hermes.home, {JOB["id"]: "Sports"}, {"Sports": "sports-chat"})
+    hermes.sessions["sports-chat"] = {"id": "sports-chat", "archived": 0}
+    assert cron_bot_chat.install()
+    job = dict(JOB)
+    assert hermes.delivery.deliver(job, "Rain at 9.", "") is None
+    assert hermes.notes == [(str(hermes.home.resolve()), "sports-chat", HEADER + "\n\nRain at 9.", False)]
+    assert hermes.turns == [] and job["_bot_chat_delivery_receipts"]["bot-chat:(own)"]["status"] == "shown"
+
+
+def test_a_script_job_under_a_topic_pushes_a_notification_that_opens_the_topic_chat(hermes, pushes):
+    _topics(hermes.home, {JOB["id"]: "Sports"}, {"Sports": "sports-chat"})
+    hermes.sessions["sports-chat"] = {"id": "sports-chat", "archived": 0}
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB, no_agent=True), "Waiver: Smith is free.", "") is None
+    (event,) = pushes.events
+    assert event["session_id"] == "sports-chat" and event["title"] == "Morning 'news'"
+
+
+def test_a_topic_chat_that_was_deleted_or_archived_and_an_unfiled_job_keep_the_bot_chat(hermes):
+    _topics(hermes.home, {JOB["id"]: "Sports", "bbbbbbbbbbbb": "Travel"}, {"Sports": "gone-chat", "Travel": "old-chat"})
+    hermes.sessions["old-chat"] = {"id": "old-chat", "archived": 1}
+    assert cron_bot_chat.install()
+    for job_id in (JOB["id"], "bbbbbbbbbbbb", "cccccccccccc"):
+        assert hermes.delivery.deliver(dict(JOB, id=job_id), "Rain.", "") is None
+    assert [note[1] for note in hermes.notes] == ["bot-chat-tip"] * 3
+
+
+def test_an_unreadable_topic_file_keeps_the_bot_chat(hermes):
+    (hermes.home / "conduit-cron-topics.json").write_text("{not json", encoding="utf-8")
+    assert cron_bot_chat.install()
+    assert hermes.delivery.deliver(dict(JOB), "Rain.", "") is None
+    assert [note[1] for note in hermes.notes] == ["bot-chat-tip"]
+
+
+def test_topics_are_this_profiles_and_never_override_a_job_that_lets_its_bot_act(hermes, monkeypatch):
+    _topics(hermes.home, {JOB["id"]: "Sports"}, {"Sports": "sports-chat"})
+    hermes.sessions["sports-chat"] = {"id": "sports-chat", "archived": 0}
+    assert cron_bot_chat.install()
+    hermes.owned = False
+    monkeypatch.setattr(cron_bot_chat.time, "sleep", lambda seconds: None)
+    assert hermes.delivery.deliver(dict(JOB), "Rain.", "furina") is None  # another profile's Bot Chat
+    assert [written[0] for written in hermes.written] == ["bot-chat-tip"]
+    CronStore(hermes.home).set_act(JOB["id"], True)
+    assert hermes.delivery.deliver(dict(JOB), "Rain.", "") is None
+    assert hermes.turns == [(JOB["id"], "Rain.", "", False)]

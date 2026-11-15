@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.162.3 (2026-11-15)
+
+### New and improved
+- Scheduled reports can go to topic chats instead of piling up in the Bot Chat. File a job under a topic in `conduit-cron-topics.json` (`{"jobs": {"<job id>": "<topic>"}, "chats": {"<topic>": "<chat id>"}}`) and its report shows in that topic's chat, with its notification opening that chat. A job that isn't filed, a topic chat that was deleted or archived, and a job set to "Let the bot act on it" keep the Bot Chat.
+
 ## 0.162.2 (2026-11-13)
 
 ### Fixes
