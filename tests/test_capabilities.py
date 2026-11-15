@@ -148,6 +148,7 @@ def test_every_capability_names_a_served_route_family():
         "artifacts": "/artifacts",
         "workspace-files": "/workspace/",
         "workspace-resolve": "/workspace/resolve",
+        "hermes-config": "/hermes-config/memory",
         "room-rules": "/rooms/",
         "room-forget": "/rooms/sessions",
         "room-links": "/rooms/links",

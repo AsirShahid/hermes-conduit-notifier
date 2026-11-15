@@ -214,6 +214,10 @@ ROUTE_CAPABILITIES = (
     # the chat's folder, its repository's top, the terminal's folder and its
     # own tool calls (hermes-conduit#1809).
     "workspace-resolve",
+    # /hermes-config/*: Conduit's Hermes page, built-in memory entries (MEMORY.md
+    # and USER.md) through Hermes' own store, OpenViking browse/search/read/
+    # forget through its provider, and the profile's Hermes file paths.
+    "hermes-config",
     "local-live",
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).

@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.163.0 (2026-11-15)
+
+### New and improved
+- Conduit's new Hermes page can show and edit what Hermes remembers: Memory and User profile entries with their character limits, and OpenViking memories to browse, search, read and forget. Edits go through Hermes' own memory store, so its limits and safety scan still apply, and an entry that changed in the meantime is never overwritten.
+
 ## 0.162.5 (2026-11-15)
 
 ### Fixes

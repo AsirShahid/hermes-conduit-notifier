@@ -777,6 +777,43 @@ profile's memory routes answer 503 at once until it returns, and other profiles
 are unaffected. `?profile=<name>`
 reads that profile's memory, as the other routes do.
 
+## Hermes configuration
+
+Conduit's Hermes page (Settings > Hermes configuration) edits what Hermes
+remembers and runs on, as the user: the dashboard is the user, so these writes
+skip the agent's write-approval queue, as Hermes' own `/api/skills` edits do.
+Skills need nothing from the plugin (`POST /api/skills`, `PUT /api/skills/content`).
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/hermes-config/memory` | `{ok, available, targets: {memory, user}}`, each `{enabled, entries, used, limit}` |
+| POST | `/api/plugins/conduit_push/hermes-config/memory` with `{target, action, entry?, content?}` | `{ok, message, memory}` (the listing after the change) |
+| GET | `/api/plugins/conduit_push/hermes-config/viking?action=list\|search\|read&uri=&q=` | `{ok, available, entries}` / `{ok, available, results, total}` / `{ok, available, uri, content, truncated}` |
+| POST | `/api/plugins/conduit_push/hermes-config/viking/forget` with `{uri}` | `{ok, available, status, uri}` |
+| GET | `/api/plugins/conduit_push/hermes-config/files` | `{ok, home, files: [{key, path, exists, size}]}` |
+
+Memory goes through Hermes' own `MemoryStore` (`load_on_disk_store`), so its
+file lock, character limits, drift guard and injection scan apply. `target` is
+`memory` (MEMORY.md) or `user` (USER.md); `action` is `add`, `edit` or `remove`.
+An edit or removal names the whole entry it changes (`entry`), and only that
+exact entry qualifies: one that changed since the phone read it is refused
+(409), never applied to a different entry. Refusals (over the limit, a stale
+entry, text the scan blocks, a target turned off) are 409 with a sentence for a
+person rather than the store's agent-facing wording.
+
+OpenViking is reached through the OpenViking memory provider's own tools
+(`viking_browse`, `viking_search`, `viking_read` at full detail, capped at
+60,000 characters, and `viking_forget`, which accepts only memory files), on the
+provider instance the memory routes keep for each profile, so its port stays
+closed and its own auth applies. With another provider, or none, `available` is
+false. Addresses must be `viking://`. Forgetting is a POST only.
+
+`files` lists the profile's `SOUL.md`, `config.yaml`, `memories/MEMORY.md`,
+`memories/USER.md` and `cron/jobs.json`, for Conduit's shortcuts. Opening one
+goes through the workspace file routes, which keep refusing `.env`,
+`config.yaml` and credential files. Every route is capped at 120 requests per
+minute per profile and takes `?profile=<name>`.
+
 ## Personality for voice
 
 Conduit's voice modes can keep the agent's personality without reading stage

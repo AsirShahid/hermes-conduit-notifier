@@ -292,7 +292,7 @@ imports:
   cron:
     optional: ["jobs"]
   cron.jobs:
-    optional: ["trigger_job"]
+    optional: ["get_job", "trigger_job"]
   gateway.config:
     optional: ["Platform"]
   gateway.platforms.base:
@@ -390,7 +390,9 @@ imports:
   tools.cronjob_tools:
     optional: ["cronjob"]
   tools.memory_tool:
-    required: ["MemoryStore", "get_builtin_memory_config", "get_builtin_memory_store_flags", "get_memory_dir"]
+    required: ["MemoryStore", "get_builtin_memory_config", "get_builtin_memory_store_flags", "get_memory_dir", "load_on_disk_store"]
+  tools.memory_tool_store:
+    optional: ["ENTRY_DELIMITER", "FAILURE_CLASS"]
   tools.tool_backend_helpers:
     optional: ["*"]
   tools.voice_live:
@@ -467,6 +469,7 @@ module_paths:
   - tools/clarify_tool
   - tools/cronjob_tools
   - tools/memory_tool
+  - tools/memory_tool_store
   - tools/tool_backend_helpers
   - tools/voice_live
   - tools/web_tools
@@ -516,6 +519,11 @@ routes:
   - POST /health/key
   - GET /health/status
   - POST /health/wipe
+  - GET /hermes-config/files
+  - GET /hermes-config/memory
+  - POST /hermes-config/memory
+  - GET /hermes-config/viking
+  - POST /hermes-config/viking/forget
   - POST /inbox/delete
   - POST /inbox/ingest
   - POST /inbox/key
