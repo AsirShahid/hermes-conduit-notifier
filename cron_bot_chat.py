@@ -267,18 +267,15 @@ _NOTE_NAME = re.compile(r'\A\[Cron job "(?P<name>.*)" report: ')
 
 def push_report(job: dict, home: Path, chat: str, note: str, key: str, for_failure: bool,
                 send: Optional[Callable[..., Any]] = None) -> bool:
-    """A script-only job (``no_agent``) runs no turn, so no turn's end
-    pushes its report the way an agent job's run does: shown in the Bot
-    Chat and nowhere else, it would wait there unseen. It pushes here
-    instead, titled with the job's name and replacing the job's last
-    notification, and sent before the run's short-lived worker exits. An
-    agent job (its own turn pushes), a muted job, a silent report, another
-    profile's Bot Chat (its pairing is that profile's) and a paused
-    pairing send nothing, and a push that fails never fails the delivery.
-    True when it went to the relay."""
+    """The report's push, from the chat it shows in: titled with the job's
+    name, replacing the job's last notification, and sent before the run's
+    short-lived worker exits. A script-only job (``no_agent``) runs no turn
+    to push; an agent job's run keeps quiet for it (cron_runs.shown_in_chat),
+    since its run's chat is hidden and the tap belongs where the report is.
+    A muted job, a silent report, another profile's Bot Chat (its pairing is
+    that profile's) and a paused pairing send nothing, and a push that fails
+    never fails the delivery. True when it went to the relay."""
     try:
-        if not job.get("no_agent"):
-            return False
         from . import cron_runs
         from .cron_store import valid_job_id
 

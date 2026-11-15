@@ -593,6 +593,8 @@ def _post_llm_call(**kwargs: Any) -> None:
     # (compaction_skip) is no news either.
     quiet = (workstream or is_silent_response(response) or compaction_skip.notice(response) == compaction_skip.SKIPPED_DETAIL
              or cron_runs.quiet(session_id, kwargs.get("task_id"), response)
+             # A job shown in a Conduit chat notifies from that chat, not from its run's hidden one.
+             or (cron_runs.shown_in_chat(kwargs.get("task_id")) and not headline)
              or (pulse_turn and not pulse.pushes(session_id, kwargs.get("turn_id"), response))
              or _member_room_turn(session_id) or _lead_routing(kwargs.get("turn_id"))
              or (automation and not headline))

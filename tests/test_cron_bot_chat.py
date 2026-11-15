@@ -334,10 +334,15 @@ def test_a_script_jobs_failure_push_says_it_failed(hermes, pushes):
     assert event["title"] == "Morning 'news' failed"
 
 
-def test_an_agent_jobs_report_pushes_nothing_here_since_its_turn_did(hermes, pushes):
+def test_an_agent_jobs_report_pushes_from_the_chat_it_shows_in(hermes, pushes):
+    # 2026-11-15: an agent job's only push was its run's own, which opened the run's hidden chat ("Hermes" on
+    # Android, an empty-looking run) instead of the topic chat that shows the report. The run's push is now quiet
+    # (cron_runs.shown_in_chat) and the note's push opens the chat, as a script job's always did.
     assert cron_bot_chat.install()
     assert hermes.delivery.deliver(dict(JOB), "Rain at 9.", "") is None
-    assert len(hermes.notes) == 1 and pushes.events == []
+    assert len(hermes.notes) == 1
+    (event,) = pushes.events
+    assert event["session_id"] == "bot-chat-tip" and event["title"] == "Morning 'news'"
 
 
 def test_muted_silent_paused_and_another_profiles_reports_push_nothing(hermes, pushes, monkeypatch):

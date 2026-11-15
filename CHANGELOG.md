@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.162.5 (2026-11-15)
+
+### Fixes
+- A scheduled job that reports in a Conduit chat (`deliver: bot-chat`, a topic chat included) now notifies from that chat, whether or not it runs an agent. Before, an agent job's only notification came from its run's own hidden chat, so its tap opened an empty-looking run instead of the chat with the report.
+
 ## 0.162.4 (2026-11-15)
 
 ### New and improved

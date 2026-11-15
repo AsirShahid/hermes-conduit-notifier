@@ -12,6 +12,11 @@ A run stays quiet when:
   SILENT / NO_REPLY) as the whole reply, on its own first or last line, or
   opening the reply (``[SILENT] No changes``). Hermes doesn't deliver such a
   run anywhere else either. Chats keep the exact rule (events).
+
+A run's own turn also stays quiet when its job is delivered to a Conduit chat
+(``deliver: bot-chat``, ``shown_in_chat``): the note shown there pushes, opening
+that chat (cron_bot_chat.push_report), or with "Let the bot act on it" the bot's
+reply there does. The run's own chat is hidden; its push opened it.
 """
 
 from __future__ import annotations
@@ -64,6 +69,32 @@ def _fallback_silent(response: Any) -> bool:
         return True
     lines = [line for line in stripped.splitlines() if line.strip()]
     return any(" ".join(line.split()).casefold() in _FALLBACK_MARKERS for line in (lines[0], lines[-1]))
+
+
+def _job(job: str) -> dict | None:
+    """Hermes' record of a cron job, or None when it can't be read."""
+    try:
+        from cron.jobs import get_job
+    except ImportError:
+        return None
+    try:
+        found = get_job(job)
+    except Exception:  # noqa: BLE001 - unreadable: the run notifies as before
+        logger.debug("conduit_push: cron job %s unreadable", job, exc_info=True)
+        return None
+    return found if isinstance(found, dict) else None
+
+
+def shown_in_chat(task_id: Any) -> bool:
+    """Whether this is a run's own turn (``cron:<job>:<run>``) whose job is delivered to a Conduit chat, which then
+    notifies for it. A follow-up asked in a run's chat, or a job Hermes can't describe, notifies as before."""
+    match = _TASK.match(task_id) if isinstance(task_id, str) else None
+    if not match or not valid_job_id(match.group(1)):
+        return False
+    record = _job(match.group(1))
+    deliver = record.get("deliver") if record else None
+    targets = deliver if isinstance(deliver, list) else str(deliver or "").split(",")
+    return any(isinstance(target, str) and target.strip().split(":")[0] == "bot-chat" for target in targets)
 
 
 def muted(job: str) -> bool:

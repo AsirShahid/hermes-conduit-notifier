@@ -786,6 +786,31 @@ def test_each_scheduled_job_keeps_one_notification(pushed, runs):
     assert [event.get("slot") for event in pushed] == [job, job, job, None], "a chat keeps its own"
 
 
+def test_a_job_shown_in_a_conduit_chat_notifies_from_there_not_from_its_hidden_run(pushed, monkeypatch, tmp_path):
+    # 2026-11-15: an agent job delivered to a topic chat pushed from its run, whose tap opened the hidden run.
+    jobs = {"topics": {"id": "topics", "deliver": "bot-chat"}, "acts": {"id": "acts", "deliver": "bot-chat"},
+            "quiet": {"id": "quiet", "deliver": "local"}}
+    monkeypatch.setattr(plugin.cron_runs, "_job", lambda job: jobs.get(job))
+    monkeypatch.setattr(plugin.cron_runs, "get_hermes_home", lambda: tmp_path)
+    sys.modules["conduit_push.cron_store"].CronStore(tmp_path).set_act("acts", True)
+
+    def run(job, n, reply="Report."):
+        plugin._post_llm_call(session_id=f"local-{job}-{n}", turn_id=f"t{n}", task_id=f"cron:{job}:{n}", assistant_response=reply)
+        plugin._on_session_end(session_id=f"local-{job}-{n}", turn_id=f"t{n}", task_id=f"cron:{job}:{n}", completed=True,
+                               failed=False, interrupted=False)
+
+    run("topics", 1)  # its note's push opens the topic chat (cron_bot_chat.push_report)
+    run("acts", 2)  # the bot's turn in the Bot Chat replies, and that reply pushes
+    assert pushed == []
+    run("quiet", 3)  # delivered nowhere in Conduit: the run's own push is still the only one
+    run("unknown", 4)  # a job Hermes can't describe notifies as before
+    assert [event["session_id"] for event in pushed] == ["local-quiet-3", "local-unknown-4"]
+    # A follow-up asked in a run's chat is a conversation: it notifies.
+    plugin._post_llm_call(session_id="local-topics-1", turn_id="t5", task_id="", assistant_response="Answer.")
+    plugin._on_session_end(session_id="local-topics-1", turn_id="t5", completed=True, failed=False, interrupted=False)
+    assert pushed[-1]["session_id"] == "local-topics-1"
+
+
 def test_a_key_is_kept_short_and_plain(paired):
     assert notify_tool.slot_key("  Weekly  Report!! ") == "weekly-report"
     assert notify_tool.slot_key("a" * 80) == "a" * notify_tool.MAX_KEY_CHARS
