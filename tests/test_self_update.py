@@ -568,6 +568,8 @@ def test_the_notification_goes_to_the_profile_that_asked(monkeypatch):
     assert sent and sent[0]["type"] == "background_task.finished"
     assert sent[0]["title"] == "Conduit plugin updated" and "0.63.0" in sent[0]["body"]
     assert sent[0]["profile"] == "default"
+    # It names no chat, so its tap opens Conduit's plugin settings (Android dropped a push with nowhere to open).
+    assert sent[0]["open"] == "conduit://settings/plugin"
 
 
 def test_the_plugin_client_imports_with_its_siblings():

@@ -1198,7 +1198,8 @@ def _notify_self_update(job: Dict[str, Any]) -> None:
             # Per outcome: a failure the restarted dashboard corrects isn't a
             # duplicate of the push the dying one sent.
             event = events.push_event("background_task.finished", identifier=events.event_id("plugin-update", job["id"], job.get("step")),
-                                      profile=profile or "default", profile_name=_bot_name(client), title=title, body=body)
+                                      profile=profile or "default", profile_name=_bot_name(client), title=title, body=body,
+                                      open_link="conduit://settings/plugin")
             client.send_now(event)
     except Exception as exc:  # noqa: BLE001 — a notification is a courtesy; the job file has the outcome
         logger.warning("Conduit plugin: couldn't send the update notification (%s)", type(exc).__name__)
