@@ -770,3 +770,17 @@ def test_no_push_shows_a_work_links_desktop_reference():
     assert push_event("response.ready", identifier="r", body=reply)["body"] == "W1 is waiting on you. Open W1"
     # Another chat's reference, not after a work link, stays as written.
     assert plain_text("See @session:old1 too.") == "See @session:old1 too."
+
+
+def test_a_push_can_carry_an_in_app_link_its_tap_opens():
+    """Asir, 2026-11-15: a medication reminder's notification opened the Bot Chat (where the note is written), not the
+    Meds screen. A push may name the Conduit screen its tap opens; an app that doesn't know the field opens the chat."""
+    for link in ("conduit://meds", "conduit://settings/health", "conduit://session/20261115_142859_ae2f03?profile=default",
+                 "conduit://bot/default"):
+        assert push_event("response.ready", identifier="r:1", session_id="20261115_142859_ae2f03", open_link=link)["open"] == link
+    for link in ("", None, 5, "https://example.com", "conduit://", "conduit://meds now", "conduit://Meds",
+                 "javascript:alert(1)", "conduit://meds\n", "conduit://" + "a" * 40, "conduit://session/" + "x" * 300):
+        assert "open" not in push_event("response.ready", identifier="r:1", open_link=link)
+    from e2e import INNER_FIELDS
+    assert "open" in INNER_FIELDS  # sealed: the relay never learns which screen
+    assert "open" not in redact_event(push_event("response.ready", identifier="r:1", open_link="conduit://meds"))

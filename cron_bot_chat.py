@@ -292,7 +292,7 @@ def push_report(job: dict, home: Path, chat: str, note: str, key: str, for_failu
 
 
 def _push_note(home: Path, chat: str, note: str, key: str, *, failed: bool = False, job_id: str = "",
-               send: Optional[Callable[..., Any]] = None) -> bool:
+               send: Optional[Callable[..., Any]] = None, open_link: str = "") -> bool:
     """A Bot Chat note's push: titled with the name its header carries
     (redacted, not the raw one), its text the body. Nothing for another
     profile's Bot Chat, a silent note or a paused pairing. Raises on a
@@ -334,18 +334,20 @@ def _push_note(home: Path, chat: str, note: str, key: str, *, failed: bool = Fal
         body=plain_text(shown),
         headline=title,
         slot=f"cron:{profile}:{job_id}" if job_id else "",
+        open_link=open_link,
     )
     (send or client.send_now)(event, timeout=15.0)
     logger.info("conduit_push: Bot Chat note '%s' pushed to Conduit", title)
     return True
 
 
-def say(text: str, title: str, *, send: Optional[Callable[..., Any]] = None) -> Optional[str]:
+def say(text: str, title: str, *, send: Optional[Callable[..., Any]] = None, open_link: str = "") -> Optional[str]:
     """A message from a script that can't wait for its job's run to end
     (a Duo number to match, a check stuck for hours): written into this
     profile's Bot Chat as a note titled ``title``, as a job's report is,
-    and pushed. None once the note is written (a push that fails is only
-    logged), else why it wasn't."""
+    and pushed. ``open_link`` (a conduit:// app link, e.g. conduit://meds) is
+    where the notification's tap goes instead of the Bot Chat. None once the
+    note is written (a push that fails is only logged), else why it wasn't."""
     from hermes_constants import get_hermes_home
 
     home = Path(get_hermes_home()).resolve()
@@ -359,7 +361,7 @@ def say(text: str, title: str, *, send: Optional[Callable[..., Any]] = None) -> 
         error = _note_from_elsewhere(home, chat, note, key, False)
     if error is None:
         try:
-            _push_note(home, chat, note, key, send=send)
+            _push_note(home, chat, note, key, send=send, open_link=open_link)
         except Exception:  # noqa: BLE001 - the note is written; the push is best effort
             logger.warning("conduit_push: couldn't push the Bot Chat message '%s'", title, exc_info=True)
     return error

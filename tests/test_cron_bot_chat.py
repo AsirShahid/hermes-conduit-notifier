@@ -376,6 +376,15 @@ def test_a_script_says_something_into_the_bot_chat_and_it_pushes(hermes, pushes,
     assert event["title"] == "CSC login" and "Duo code 482" in event["body"] and "sk-secret" not in event["body"]
 
 
+def test_a_script_note_can_name_the_screen_its_notification_opens(hermes, pushes, monkeypatch):
+    hermes.owned = False
+    monkeypatch.setattr(cron_bot_chat.time, "sleep", lambda seconds: None)
+    assert cron_bot_chat.say("Not logged yet today.", "Telmisartan", open_link="conduit://meds") is None
+    (event,) = pushes.events
+    assert event["open"] == "conduit://meds" and event["title"] == "Telmisartan"
+    assert len(hermes.written) == 1  # the note is still written in the Bot Chat
+
+
 def test_saying_something_with_no_bot_chat_says_why_and_pushes_nothing(hermes, pushes):
     hermes.chat = None
     assert "no Bot Chat" in cron_bot_chat.say("Duo code 482", "CSC login")

@@ -76,6 +76,8 @@ def event_id(prefix: str, *parts: Any) -> str:
 # (calls_store, present_store, settings_store), which keep their own copy.
 SESSION_KEY_MAX_BYTES = 512
 _TITLE_LABEL = re.compile(r"^[a-z_]+(\.[a-z_]+){1,2}\Z")
+# conduit://<screen>[/<id>][?query]: the app links Conduit itself understands (AppLink), never a web URL.
+_OPEN_LINK = re.compile(r"\Aconduit://[a-z][a-z0-9-]{0,31}(/[A-Za-z0-9_.:%-]{1,128})?(\?[A-Za-z0-9_.:%=&-]{1,200})?\Z")
 _SESSION_KEY_CONTROL = re.compile(r"[\x00-\x1f\x7f]")
 
 
@@ -112,6 +114,7 @@ def push_event(
     level: str | None = None,
     private: bool = False,
     slot: str = "",
+    open_link: str = "",
 ) -> dict[str, Any]:
     event: dict[str, Any] = {
         "event_id": identifier,
@@ -131,6 +134,10 @@ def push_event(
     # No push shows a host path: a MEDIA tag in a question, an approval, a
     # call, an update or a phone change reads as its attachment too. A reply
     # comes through plain_text, which already did this and kept fenced code.
+    # The Conduit screen the tap opens (2026-11-15: a medication reminder opened the Bot Chat it was written in, not
+    # Meds): an in-app link only, sealed with the content. An app that doesn't know the field opens the session.
+    if isinstance(open_link, str) and _OPEN_LINK.match(open_link):
+        event["open"] = open_link
     if title:
         event["title"] = _shown_clean(title, 120)
     if body:

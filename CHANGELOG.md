@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.162.4 (2026-11-15)
+
+### New and improved
+- A notification can open a screen of Conduit instead of the chat its note is in. `hermes conduit-push say --open conduit://meds ...` sends a medication reminder whose tap opens Meds; the link travels sealed with the notification. A Conduit that doesn't know the link opens the chat, as before.
+
 ## 0.162.3 (2026-11-15)
 
 ### New and improved

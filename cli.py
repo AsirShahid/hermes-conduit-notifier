@@ -42,6 +42,8 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     say.add_argument("text", nargs="?", default=None, help="The message; read from stdin when left out")
     say.add_argument("--title", default="Hermes", help="What the note and the notification are titled")
+    say.add_argument("--open", default="", dest="open_link", metavar="LINK",
+                     help="A Conduit app link the notification's tap opens instead of the Bot Chat (e.g. conduit://meds)")
     redact = commands.add_parser(
         "redact",
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
@@ -316,7 +318,7 @@ def dispatch(args: argparse.Namespace) -> int:
         if not text.strip():
             print("Nothing to say: give the message as an argument or on stdin.")
             return 1
-        error = cron_bot_chat.say(text.strip(), str(args.title or "Hermes"))
+        error = cron_bot_chat.say(text.strip(), str(args.title or "Hermes"), open_link=str(getattr(args, "open_link", "") or ""))
         if error:
             print(f"Not posted to the Bot Chat: {error}")
             return 1
