@@ -1,4 +1,6 @@
 import importlib.util
+import sys
+import types
 import json
 import re
 from pathlib import Path
@@ -79,6 +81,7 @@ def test_every_capability_names_a_served_route_family():
         "pulse_nudge": "/pulse",
         "pulse_done": "/pulse/done",
         "pulse_acted": "/pulse/acted",
+        "pulse_acted_chat": "/pulse/acted",
         "pulse_dismiss": "/pulse/dismiss",
         "pulse_daily_brief": "/pulse",
         "pulse_found_actions": "/pulse/done",
@@ -126,6 +129,8 @@ def test_every_capability_names_a_served_route_family():
         "phone-shortcuts": "/phone/",
         "phone-contact-edits": "/phone/",
         "phone-photos": "/phone/",
+        # sharing.turn_status, read from the phone store each turn.
+        "phone-turn-status": "/phone/",
         "pairing": "/pair",
         "self-restart": "/self/restart",
         "self-update": "/self/update",
@@ -146,14 +151,18 @@ def test_every_capability_names_a_served_route_family():
         # Agent mode: the call's tools for an engine with its own front model.
         "local-live-agent": "/local-live/v1/tools",
         "artifacts": "/artifacts",
+        "artifact-pins": "/artifacts/pins",
         "workspace-files": "/workspace/",
         "workspace-resolve": "/workspace/resolve",
         "hermes-config": "/hermes-config/memory",
         "device-reports": "/device-reports",
         "model-usage": "/model-usage",
+        "workspace-copy": "/workspace/",
         "room-rules": "/rooms/",
         "room-forget": "/rooms/sessions",
         "room-links": "/rooms/links",
+        "room-own-links": "/rooms/links/own",
+        "room-own-bots": "/rooms/own-bots",
         "room-setup": "/rooms/setup",
         "room-invites": "/rooms/drafts",
         # ?conduit_profile= on the voice and Watch routes, Local Live's first.
@@ -163,6 +172,7 @@ def test_every_capability_names_a_served_route_family():
         "room-copies": "/rooms/copies",
         "room-posts": "/rooms/copies/messages",
         "room-looks": "/rooms/looks",
+        "room-looks-you": "/rooms/looks",
         "room-chats": "/rooms/chats",
         # ?conduit_profile= on the rooms routes that need the dashboard process, the setup's first.
         "room-dashboard-profiles": "/rooms/setup",
@@ -223,3 +233,36 @@ def test_a_managed_host_says_so(monkeypatch):
 def test_a_control_character_never_reaches_the_phone(monkeypatch):
     monkeypatch.setenv("CONDUIT_PUSH_MANAGED", "Farm\x07\x1b[31m")
     assert _client().get(f"{BASE}/capabilities").json()["managed_by"] == "Farm[31m"
+
+
+def test_a_host_that_keeps_disbanded_rooms_chats_says_so(monkeypatch):
+    # cleanup_disbanded_rooms: off (room_settings, notifier #443), so Disband's warning doesn't say they go.
+    settings = api.core._plugin_package_module("room_settings")
+    monkeypatch.setattr(settings, "cleanup_disbanded", lambda home=None: "off")
+    assert _client().get(f"{BASE}/capabilities").json()["room_chats_kept"] is True
+    monkeypatch.setattr(settings, "cleanup_disbanded", lambda home=None: "delete")
+    assert "room_chats_kept" not in _client().get(f"{BASE}/capabilities").json()
+
+    def broken(home=None):
+        raise OSError("config.yaml unreadable")
+
+    monkeypatch.setattr(settings, "cleanup_disbanded", broken)
+    assert "room_chats_kept" not in _client().get(f"{BASE}/capabilities").json()
+
+
+def test_what_the_plugin_cant_do_on_this_hermes_is_listed_until_it_can(monkeypatch):
+    # Notifier issue 834: a state the host's log alone used to say.
+    degraded = api.core._plugin_package_module("degraded")
+    monkeypatch.setitem(sys.modules, degraded._HOLDER, types.ModuleType(degraded._HOLDER))
+    assert "degraded" not in _client().get(f"{BASE}/capabilities").json()
+    degraded.note(degraded.WORKSTREAM_RECOVERY)
+    degraded.note(degraded.WORKSPACE_FILES)
+    assert _client().get(f"{BASE}/capabilities").json()["degraded"] == ["workspace-files", "workstream-recovery"]
+    degraded.clear(degraded.WORKSPACE_FILES)
+    assert _client().get(f"{BASE}/capabilities").json()["degraded"] == ["workstream-recovery"]
+
+    def broken():
+        raise RuntimeError("unreadable")
+
+    monkeypatch.setattr(degraded, "current", broken)
+    assert "degraded" not in _client().get(f"{BASE}/capabilities").json()

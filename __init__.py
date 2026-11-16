@@ -57,6 +57,9 @@ _unnamed_ends: dict[str, tuple[object, Any]] = {}
 # time.monotonic()): a subagent that finishes inside it is part of its reply.
 _parent_turns: dict[str, tuple[str, float]] = {}
 _parent_turns_lock = threading.Lock()
+# Sessions whose last turn's end was handled, until their next turn starts:
+# a chat's close after that end is no stopped turn of its own (issue 820).
+_ended_turns: dict[str, None] = {}
 PARENT_TURN_MAX_S = 6 * 3600.0
 # Predictive's fast model (dashboard/api/chats.py, PREDICT_TASK) as one of
 # Hermes' helper model slots, so Conduit's Models & providers and Hermes'
@@ -127,13 +130,22 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_tool_call", _pre_tool_call)
     ctx.register_hook("post_llm_call", _post_llm_call)
     ctx.register_hook("on_session_end", _on_session_end)
+    # A chat's close also says it ended on_session_finalize, which Hermes runs
+    # on its own thread, ungated: the one end a turn still running then gets
+    # when Hermes skips its on_session_end (notifier issue 820).
+    try:
+        ctx.register_hook("on_session_finalize", _on_session_finalize)
+    except Exception:  # noqa: BLE001
+        logger.warning("conduit_push: on_session_finalize hook unavailable; a chat closed mid-turn ends its turn "
+                       "only through on_session_end", exc_info=True)
     ctx.register_hook("pre_approval_request", _pre_approval_request)
     # Pulse's outcome ledger: every tool call's outcome while Pulse is on.
     # Optional: a Hermes without the hook records nothing.
     try:
         ctx.register_hook("post_tool_call", _post_tool_call)
     except Exception:  # noqa: BLE001
-        logger.warning("conduit_push: post_tool_call hook unavailable; Pulse records no tool outcomes", exc_info=True)
+        logger.warning("conduit_push: post_tool_call hook unavailable; Pulse records no tool outcomes, and a quick "
+                       "turn's time runs from each step's start, its hand-off without the steps' results", exc_info=True)
     ctx.register_hook("subagent_start", _subagent_start)
     ctx.register_hook("subagent_stop", _subagent_stop)
     # A call held over a restart goes out when its hold runs out (#449).
@@ -265,6 +277,12 @@ def _point_profiles_here() -> None:
 
 
 def _pre_tool_call(**kwargs: Any) -> dict[str, str] | None:
+    # A tool an execute_code script calls comes with no session id, only the
+    # execute_code call's task: every rule below reads it as that call's chat
+    # and turn (notifier#784).
+    session_id, turn_id = work_tool.code_chat(kwargs.get("session_id"), kwargs.get("turn_id"), kwargs.get("task_id"))
+    if session_id != kwargs.get("session_id") or turn_id != kwargs.get("turn_id"):
+        kwargs = {**kwargs, "session_id": session_id, "turn_id": turn_id}
     # The owner's rules for a room with other people's agents come first: they
     # hold for every call a room turn makes, the background review's (it keeps
     # the room session's id) and a delegated child's (room_rules follows it to
@@ -366,7 +384,8 @@ def _screen_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
     try:
         return work_tool.tool_block(_text(kwargs.get("session_id")), kwargs.get("tool_name"), kwargs.get("args"),
-                                    turn_id=kwargs.get("turn_id"))
+                                    turn_id=kwargs.get("turn_id"), task_id=kwargs.get("task_id"),
+                                    tool_call_id=kwargs.get("tool_call_id"))
     except Exception:  # noqa: BLE001
         logger.warning("conduit_push: couldn't check the coordinator's policy", exc_info=True)
         # Only a bot that has had work (on by default otherwise) is held when its check fails.
@@ -374,6 +393,13 @@ def _work_tool_block(kwargs: dict[str, Any]) -> dict[str, str] | None:
 
 
 def _post_tool_call(**kwargs: Any) -> None:
+    session_id, turn_id = work_tool.code_chat(kwargs.get("session_id"), kwargs.get("turn_id"), kwargs.get("task_id"))
+    if session_id != kwargs.get("session_id") or turn_id != kwargs.get("turn_id"):
+        kwargs = {**kwargs, "session_id": session_id, "turn_id": turn_id}  # as _pre_tool_call reads it
+    _quietly(work_tool.code_ended, kwargs.get("tool_name"), kwargs.get("task_id"), kwargs.get("args"))
+    # A Bot Chat's quick step, a fork's too: its running time and what it returned (work_tool).
+    _quietly(work_tool.step_ran, _text(kwargs.get("session_id")), kwargs.get("turn_id"), kwargs.get("tool_name"),
+             kwargs.get("tool_call_id"), kwargs.get("result"))
     if not forks.inside():
         if kwargs.get("tool_name") == "clarify":
             _quietly(work_tool.answered, _text(kwargs.get("session_id")))
@@ -899,6 +925,10 @@ def _turn_source(platform: Any, session_id: str = "") -> str | None:
         return None
     transport = reply_sources.current_transport()
     source = reply_sources.turn_source(platform, transport)
+    if source is None and transport is None and turn_surface.sent_from_conduit_on_authority(session_id):
+        # The gateway's session authority binds no client to a turn; the
+        # report Conduit sent ahead of it is what says it came from Conduit.
+        return "conduit"
     if source is None and reply_sources.conduit_among(transport):
         try:
             if chat_on_screen.on_screen(get_hermes_home(), session_id):
@@ -931,6 +961,9 @@ def _on_session_end(**kwargs: Any) -> None:
         return
     if _is_child(session_id):
         return
+    if _session_closed_after_turn(session_id, kwargs):
+        return
+    _note_turn_ended(session_id)
     # Its turn is over: the screen is free for the bot's other chats.
     _quietly(work_tool.screen_turn_ended, session_id)
     _end_parent_turn(session_id)
@@ -1021,6 +1054,39 @@ def _on_session_end(**kwargs: Any) -> None:
     if calls.failed_turn(session_id, profile=_profile, fallback=failed, turn_id=kwargs.get("turn_id")):
         return
     enqueue(failed)
+
+
+def _session_closed_after_turn(session_id: str, kwargs: dict[str, Any]) -> bool:
+    """Whether this end is a chat's close (Hermes' session finalize: stopped,
+    no turn named) after its last turn's own end was handled, with no turn
+    started since: that end already settled everything, so the close is no
+    stopped turn of its own (notifier issue 820). Only a handled end counts,
+    never a start that is old or forgotten: a turn running for hours still
+    ends on its close. A Hermes without pre_llm_call never says when a turn
+    starts, so its ends count as before."""
+    if not pulse.turns_marked or not kwargs.get("interrupted"):
+        return False
+    turn_id = kwargs.get("turn_id")
+    if isinstance(turn_id, str) and turn_id:
+        return False
+    return _turn_end_handled(session_id)
+
+
+def _on_session_finalize(**kwargs: Any) -> None:
+    """A chat closed (Desktop let it go, /new, Hermes exiting). Hermes said
+    so on_session_end just before, but skips that call when another chat's
+    close is still in it: both name no turn, so its gate takes them for one
+    call (NousResearch/hermes-agent#104865). A turn whose end wasn't handled
+    then ends stopped, as on_session_end would have ended it; one whose end
+    that call (or the turn's own) handled is left alone, so nothing happens
+    twice. A Hermes without pre_llm_call can't say a new turn started, so
+    there on_session_end stays the only close."""
+    session_id = _text(kwargs.get("session_id"))
+    if (not session_id or not pulse.turns_marked or _is_child(session_id)
+            or _turn_end_handled(session_id)):
+        return None
+    _on_session_end(session_id=session_id, completed=False, interrupted=True, platform=kwargs.get("platform"))
+    return None
 
 
 def _pre_approval_request(**kwargs: Any) -> None:
@@ -1157,6 +1223,9 @@ def _subagent_start(**kwargs: Any) -> None:
     if child:
         with _children_lock:
             _child_sessions.add(child)
+    # One a workstream started keeps it working past its own turn's end.
+    _quietly(work_tool.agent_started, child, _text(kwargs.get("parent_session_id")),
+             _text(kwargs.get("child_subagent_id")))
 
 
 def _subagent_stop(**kwargs: Any) -> None:
@@ -1183,6 +1252,7 @@ def _subagent_stop(**kwargs: Any) -> None:
             for learned in [key for key, root in _compacted_children.items() if root == reported]:
                 del _compacted_children[learned]
     parent = _text(kwargs.get("parent_session_id"))
+    _quietly(work_tool.agent_stopped, reported if child else "", parent)
     # A subagent that ends inside the turn that started it (delegate_task
     # waits for it) is part of that turn's reply: only one that outlives it,
     # a background task, notifies. Nor does a nested one, or a muted cron job's.
@@ -1262,7 +1332,8 @@ def _text_parts(content: Any) -> list[str]:
 def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     """Context for this turn: calls from Hermes the user declined or missed
     since the last turn of this chat (#449), where in Conduit the message
-    was sent from, the voice persona hint, and which of the user's data
+    was sent from (with the phone's state, when the user lets it go with
+    each message), the voice persona hint, and which of the user's data
     Conduit shares here, to use before other routes."""
     session_id = _text(kwargs.get("session_id"))
     child = _is_child(session_id)
@@ -1275,6 +1346,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         # only one that started after its attempt (pulse._held_home_turn).
         _quietly(pulse.note_started, session_id, kwargs.get("turn_id"))
     pulse_note = None if child else _pulse_note(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
+    if not child and not forks.inside():
+        _note_turn_starting(session_id)
     if pulse_note:
         # Pulse's own turn: no Lock Screen progress, and only its note.
         _note_turn_start(kwargs.get("turn_id"))
@@ -1282,6 +1355,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
     if not child:
         _note_turn_start(kwargs.get("turn_id"))
         _note_lead_routing(session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
+        # The ask a Bot Chat's quick steps hand on to a workstream (work_tool).
+        _quietly(work_tool.note_turn_ask, session_id, kwargs.get("turn_id"), kwargs.get("user_message"))
         _start_parent_turn(session_id, kwargs.get("turn_id"))
         _drop_unnamed_end(session_id)
         # A workstream's hidden turn shows no Lock Screen progress, as Pulse's
@@ -1309,6 +1384,8 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else conduit_first.note(),
         # A room's private chat is told which room it's about (room_chats).
         None if child else _room_chat_note(session_id),
+        # A room of only the owner's own Hermes runs as at home, which its turn is told (room_rules.OWN_FRAMING).
+        _own_room_note(session_id, kwargs.get("user_message")),
         # What linked people answered this chat's asks since (link_ask_tool), once.
         None if child else _link_answers_note(session_id),
         # A coordinator Bot Chat's open work (work_tool).
@@ -1321,9 +1398,19 @@ def _pre_llm_call(**kwargs: Any) -> dict[str, str] | None:
         None if child else _review_note(session_id),
         # When to draw a board instead of writing it out (show_tool).
         None if child else _board_rule(kwargs.get("platform"), session_id),
+        # A call watch's run on an older prompt: how to reach the report (call_watches).
+        None if child else _watch_run_note(session_id, kwargs.get("task_id")),
     ]
     context = "\n\n".join(note for note in notes if note)
     return {"context": context} if context else None
+
+
+def _watch_run_note(session_id: str, task_id: Any) -> str | None:
+    try:
+        return call_watches.run_note(session_id, task_id)
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: call watch prompt refresh failed", exc_info=True)
+        return None
 
 
 def _checklist_note(session_id: str) -> str | None:
@@ -1391,6 +1478,26 @@ def _link_answers_note(session_id: str) -> str | None:
     if not lines:
         return None
     return "Answers to your asks to linked people (conduit_ask_linked):" + "".join(f"\n- {line}" for line in lines)
+
+
+def _own_room_note(session_id: str, prompt: Any = None) -> str | None:
+    """OWN_FRAMING for a turn in a room of only the owner's own Hermes, with
+    the pictures its messages name (Hermes' peer route carries none to the
+    far Hermes, so the agent sees one only by looking); None for any other."""
+    if not session_id:
+        return None
+    try:
+        turn = room_rules.room_turn(session_id, get_hermes_home())
+    except Exception:  # noqa: BLE001 — a hook must never break the turn
+        logger.debug("conduit_push: own room note failed", exc_info=True)
+        return None
+    if turn is None or not turn.own:
+        return None
+    try:
+        pictures = room_rules.turn_pictures_line(prompt)
+    except Exception:  # noqa: BLE001 — the note goes without it
+        pictures = None
+    return room_rules.OWN_FRAMING + (f"\n- {pictures}" if pictures else "")
 
 
 def _room_chat_note(session_id: str) -> str | None:
@@ -1649,6 +1756,13 @@ def _room_framing(session_id: str, platform: Any = None, prompt: Any = None) -> 
                 unread = True
                 _warn_room_once("posts", "conduit_push: couldn't read the posts of room %s", turn.room_id)
     framing = room_rules.framing(turn, choices, people, posts, unread=unread)
+    try:
+        # A picture the turn's messages name, which the agent sees only by looking.
+        pictures = room_rules.turn_pictures_line(prompt)
+    except Exception:  # noqa: BLE001 — the standing pictures line still says how
+        pictures = None
+    if pictures:
+        framing += f"\n- {pictures}"
     if home is not None and turn.room_id and not child:
         try:
             # What the owner answered the agent's asks since (room_asks), once.
@@ -1690,7 +1804,13 @@ def _turn_surface_note(platform: Any, message: Any, session_id: str = "") -> str
         from_conduit = _turn_source(platform, session_id) == "conduit"
     except Exception:  # noqa: BLE001 — a hook must never break the turn
         from_conduit = False
-    return turn_surface.note(from_conduit, message, transport, session_id=session_id)
+    line = turn_surface.note(from_conduit, message, transport, session_id=session_id)
+    if line is None:
+        return None
+    # The phone's state goes only with a turn Conduit sent, when the user
+    # lets it (issue 888).
+    state = phone_tool.turn_note()
+    return f"{line}\n{state}" if state else line
 
 
 def _note_lead_routing(session_id: str, turn_id: Any, user_message: Any) -> None:
@@ -1741,6 +1861,28 @@ def _start_parent_turn(session_id: str, turn_id: Any) -> None:
         _parent_turns[session_id] = (turn_id if isinstance(turn_id, str) else "", time.monotonic())
         while len(_parent_turns) > MAX_TURN_STARTS:
             _parent_turns.pop(next(iter(_parent_turns)))
+
+
+def _note_turn_starting(session_id: str) -> None:
+    with _parent_turns_lock:
+        _ended_turns.pop(session_id, None)
+
+
+def _note_turn_ended(session_id: str) -> None:
+    """This session's turn end is handled. Evicted when there are many,
+    which only lets a later close run as a stopped turn, as before."""
+    if not session_id:
+        return
+    with _parent_turns_lock:
+        _ended_turns.pop(session_id, None)
+        _ended_turns[session_id] = None
+        while len(_ended_turns) > MAX_TURN_STARTS:
+            _ended_turns.pop(next(iter(_ended_turns)))
+
+
+def _turn_end_handled(session_id: str) -> bool:
+    with _parent_turns_lock:
+        return session_id in _ended_turns
 
 
 def _end_parent_turn(session_id: str) -> None:

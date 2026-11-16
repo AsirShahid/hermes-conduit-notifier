@@ -22,7 +22,6 @@ import socket
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -34,7 +33,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools.clarify_tool" not in sys.modules:
     _tools = sys.modules.setdefault("tools", types.ModuleType("tools"))
@@ -840,6 +839,24 @@ def test_a_pulse_turn_gets_its_note_and_no_tools(live, db):
     # Once Pulse's turn ended, a turn there is the user's own.
     pulse.turn_ended(SID, "t1")
     assert plugin._pre_tool_call(session_id=SID, turn_id="t2", tool_name="read_file", args={}) is None
+
+
+def test_another_chats_script_isnt_held_while_a_pulse_turn_runs(live, db):
+    # DeepSeek on notifier#795: a tool an execute_code script calls comes
+    # with no session id, which Pulse holds while any attempt is in flight;
+    # its task names the chat it's from, which isn't Pulse's.
+    db.session()
+    live.store.set("enabled", True)
+    pulse.tick()
+    plugin._pre_llm_call(session_id=SID, turn_id="t1", user_message=live.sent()[0], conversation_history=[])
+    assert plugin._pre_tool_call(session_id="", tool_name="read_file", args={}) == {
+        "action": "block", "message": pulse.HELD_MESSAGE}
+    assert plugin._pre_tool_call(session_id="elsewhere", turn_id="e1", task_id="task-e", tool_name="execute_code",
+                                 args={}) is None
+    assert plugin._pre_tool_call(session_id="", task_id="task-e", tool_name="read_file", args={}) is None
+    plugin._post_tool_call(session_id="elsewhere", task_id="task-e", tool_name="execute_code", args={}, result="{}")
+    assert plugin._pre_tool_call(session_id="", task_id="task-e", tool_name="read_file", args={}) == {
+        "action": "block", "message": pulse.HELD_MESSAGE}
 
 
 def test_a_lookalike_tag_is_not_a_pulse_turn(live, db):
@@ -2211,8 +2228,13 @@ def test_each_kind_comes_from_its_own_speaker():
         raw("commitment", "I'll renew the lease"), raw("commitment", "Kept for you to purge"),
         raw("promise", "I'll renew the lease"), raw("fact", "my sister is called Ana"),
         raw("fact", "the rollback tag")]}), chunk, UTC)
-    # Hermes's words aren't the user's commitment, nor the user's Hermes's promise
-    assert [(i["kind"], i["message_id"]) for i in items] == [("commitment", 1), ("fact", 1), ("fact", 2)]
+    # Hermes's words aren't the user's commitment, nor the user's Hermes's promise,
+    # nor a fact about the user (what Hermes read while doing a job, Eric's host 2026-11-11)
+    assert [(i["kind"], i["message_id"]) for i in items] == [("commitment", 1), ("fact", 1)]
+    assert "is that job's instructions, not the user telling Hermes about themselves" in memory.INSTRUCTIONS
+    assert "never what Hermes read in their mail, messages, files or accounts" in memory.INSTRUCTIONS
+    # Asked to remember what Hermes read out, the model is told which line a fact must come from
+    assert "then its evidence is the user's line asking" in memory.INSTRUCTIONS
 
 
 def test_only_a_do_it_cards_reminder_sent_after_it_counts_as_handed_on(live):
@@ -3382,7 +3404,9 @@ def test_memory_command(remembering, db, capsys, monkeypatch):
         due="2026-10-21", due_at=DAY + 86400, message_id=5, mentioned_at=DAY + 60)])
     assert run() == 0
     out = capsys.readouterr().out
-    assert "Promise (1)\n  #1 Hermes will check the build. (due 2026-10-21)\n      \"I'll check the build\" (20 Oct)" in out
+    zone = pulse.report_zone(remembering.store, remembering.store.path.parent)
+    said = datetime.fromtimestamp(DAY, zone).strftime("%d %b")  # in the zone the command uses (#322)
+    assert f"Promise (1)\n  #1 Hermes will check the build. (due 2026-10-21)\n      \"I'll check the build\" ({said})" in out
     assert run("fact") == 0 and "hasn't kept" in capsys.readouterr().out
     monkeypatch.setattr(cli, "MEMORY_LIST", 0)
     assert run() == 0 and "The 0 most recent of 1:" in capsys.readouterr().out
@@ -3752,3 +3776,34 @@ def test_an_app_the_user_never_connected_is_left_out(recording):
     followups = sys.modules["conduit_push.pulse_followup"]
     for checks in (followups.INSTRUCTIONS, followups.COMMITMENT_INSTRUCTIONS, followups.WATCH_INSTRUCTIONS):
         assert checks.endswith(ledger.UNSET_RULE)  # a check's news can be a card with no turn after it
+
+
+@pytest.mark.parametrize("version, hint", [
+    ("0.22.5", "Update Hermes to 0.22.6 or newer: 0.22.5 can't move Hermes Desktop's chat to the gateway"),
+    ("0.23.1", "Set Pulse up again in Settings > Pulse: Hermes couldn't open its chat"),
+    (None, "Set Pulse up again in Settings > Pulse: Hermes couldn't open its chat"),
+])
+def test_a_chat_hermes_cant_find_says_what_to_do(monkeypatch, version, hint):
+    # Issue 713: a chat Hermes Desktop made on Hermes 0.22.5 is not_found once Pulse's turn
+    # goes through the gateway; a bare "not_found" left the person with nothing to do.
+    monkeypatch.setattr(host, "hermes_version", lambda: tuple(map(int, version.split("."))) if version else None)
+    FakeHost(resume={"error": {"code": 4007, "message": "session not found"}}).install(monkeypatch)
+    sent = host.send(SID, "x")
+    # The step comes first: Settings > Pulse shows three lines of it.
+    assert not sent.ok and sent.detail.startswith(hint) and sent.detail.endswith("(session not found)")
+    assert len(sent.detail) <= 120, len(sent.detail)
+
+
+def test_only_a_missing_chat_gets_the_advice(monkeypatch):
+    monkeypatch.setattr(host, "hermes_version", lambda: (0, 22, 5))
+    FakeHost(resume={"error": {"code": 4007, "message": "session_key required"}}).install(monkeypatch)
+    assert host.send(SID, "x").detail == "couldn't open the chat: session_key required"
+
+
+def test_hermes_version_reads_hermes_cli(monkeypatch):
+    fake = types.ModuleType("hermes_cli")
+    fake.__version__ = "0.22.5+4.gc4434be"
+    monkeypatch.setitem(sys.modules, "hermes_cli", fake)
+    assert host.hermes_version() == (0, 22, 5)
+    fake.__version__ = "dev"
+    assert host.hermes_version() is None

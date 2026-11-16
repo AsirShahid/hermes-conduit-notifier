@@ -76,6 +76,25 @@ def test_one_workstream_alone_is_not_read(on, hermes, home, told):
     assert batched() == []
 
 
+def test_work_that_finished_hours_ago_is_no_longer_other_work(on, hermes, home, told):
+    """One workstream working costs no read once the other settled longer
+    ago than work_start holds a new task against it (six hours); settled
+    more lately, a report may still break what it built."""
+    def settled(ago):
+        on.update("W2", status="done")
+        with on._db() as con:
+            con.execute("UPDATE work SET updated_at = ? WHERE ref = 'W2'", (time.time() - ago,))
+
+    two(on)
+    settled(3600)
+    call("work_progress", {"found": "GET /v1/users now returns 410 Gone"}, session_id=WORKER)
+    helper = Helper()
+    assert watch.check(home, ask=helper) is None and len(helper.read) == 1
+    settled(watch.SETTLED_AGE_S + 60)
+    call("work_progress", {"found": "the login page loads 4 MB of scripts"}, session_id=WORKER)
+    assert watch.check(home, ask=helper) is None and len(helper.read) == 1
+
+
 def test_nothing_to_flag_starts_no_turn_and_is_counted(on, hermes, home, told):
     two(on)
     call("work_progress", {"found": "the login page loads 4 MB of scripts"}, session_id=WORKER)
@@ -258,10 +277,15 @@ def test_flags_kept_without_a_turn_dont_reopen_the_hours_allowance(on, hermes, h
 
 def test_a_long_report_keeps_the_line_the_flag_is_about(on, hermes, home, told):
     two(on)
+    # More lines than a read quotes (READ_LINES), so only the old selection's
+    # slice would lose the first.
     call("work_progress", {"found": ["GET /v1/users now returns 410 Gone", "the docs say v2", "v2 needs a token",
                                      "the token is in the vault"]}, session_id=WORKER)
+    for text in ("the vault needs a login", "the login is SSO", "retry tomorrow"):
+        on.event_add("W1", "found", "worker", text)
     assert watch.check(home, ask=Helper(FLAG))["woke"]
     assert "«GET /v1/users now returns 410 Gone»" in batched()[-1]
+    assert "«retry tomorrow»" in batched()[-1]
 
 
 def test_what_the_user_wrote_while_it_ran_is_read_when_the_turn_ends(on, hermes, home, told, monkeypatch):
@@ -279,6 +303,29 @@ def test_what_the_user_wrote_while_it_ran_is_read_when_the_turn_ends(on, hermes,
     assert seen == ["W1", "W2"]
 
 
+def test_what_the_user_wrote_reaches_the_watch_when_a_stopped_turn_ends(on, hermes, home, told, monkeypatch):
+    two(on)
+    seen = []
+    monkeypatch.setattr(watch, "noticed", lambda home, ref, **_: seen.append(ref))
+    monkeypatch.setattr(work.work_coord, "read_user_words", lambda home, store, item: 1)
+    on.update("W1", status="stopped")
+    work._turn_finished(on.get("W1").session_id, failed=False, interrupted=True)
+    assert seen == ["W1"]
+
+
+def test_what_the_user_wrote_reaches_the_watch_when_they_stop_the_turn_from_its_chat(on, hermes, home, told,
+                                                                                  monkeypatch):
+    # Interrupted with no work_stop and no redirect: the user stopped it in its own chat.
+    two(on)
+    seen = []
+    monkeypatch.setattr(watch, "noticed", lambda home, ref, **_: seen.append(ref))
+    monkeypatch.setattr(work.work_coord, "read_user_words", lambda home, store, item: 1)
+    assert on.get("W1").status in work._SETTLES
+    work._turn_finished(on.get("W1").session_id, failed=False, interrupted=True)
+    assert seen == ["W1"]
+    assert on.get("W1").status == "interrupted"
+
+
 def test_an_older_own_send_keeps_its_state_after_many_later_sends(on, hermes, home):
     start()
     first = on.outbox_add("W1", "send", WORKER, "Use /v2/users", own=True)
@@ -288,3 +335,6 @@ def test_an_older_own_send_keeps_its_state_after_many_later_sends(on, hermes, ho
         on.outbox_add("W1", "send", WORKER, f"Later {number}")
     item, = [item for item in work.work_coord.app_items(on, {"W1": "Login bug"}) if item["kind"] == "sent"]
     assert item["state"] == "delivered"
+    # The Bot Chat's board reads it the same way (notifier 673).
+    lines = work.work_coord.board(home, on, [on.get("W1")], lambda at: "just now", lambda *_: True)["W1"]
+    assert any("«Use /v2/users»" in line and "it's in its chat" in line for line in lines)

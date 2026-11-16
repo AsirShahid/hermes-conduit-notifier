@@ -7,7 +7,7 @@ import time
 
 import pytest
 
-from test_pulse import ROOT, SID, _load, cli, control, pulse, store
+from test_pulse import FIXTURE_SCHEMA, ROOT, SID, StateDB, _load, cli, control, pulse, store
 from test_pulse_candidates import listed, reporting  # noqa: F401
 from test_pulse_followup import CHAT, _iso, check_now, followup, live, llm_saying, logged, promise, tell  # noqa: F401
 
@@ -1369,6 +1369,71 @@ def test_do_it_on_a_report_item_from_no_chat_reads_the_new_chat_not_pulses_own(l
     assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
 
 
+def test_do_it_on_a_card_from_no_chat_reads_the_bot_chat_the_app_names(live):
+    card_id = found_card(live)
+    bot_home = live.home / "profiles" / "nahida"
+    bot_home.mkdir(parents=True)
+    bot = StateDB(bot_home, FIXTURE_SCHEMA)
+    bot.session("bot-chat", title="Bot Chat", pinned=0)
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at, chat={"profile": "nahida", "id": "bot-chat"}) is True
+    assert (live.store.act(card_id)["chat_profile"], live.store.act(card_id)["chat_id"]) == ("nahida", "bot-chat")
+    said = llm_saying(done=True, why="the reminder is set")
+    # Not answered there yet: nothing to read.
+    bot.message("user", "Pulse reminded me: The dentist is Friday at 9.", sid="bot-chat", at=acted_at + 5)
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    assert said.calls == [] and live.store.act(card_id)["outcome"] == ""
+    bot.message("assistant", "Set a reminder for the dentist on Friday.", sid="bot-chat", at=acted_at + 30)
+    run_acts(live, said, acted_at + 2 * followup.ACT_FIRST_S)
+    [text] = said.calls
+    said_there = text.split("## Said in that chat since Do it")[1].split("\n## ")[0]
+    assert "Set a reminder for the dentist" in said_there and "the chat they picked" in said_there
+    assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+
+
+def test_do_it_on_a_bots_card_reads_the_chat_the_app_names_in_pulses_own_profile(live):
+    """"" names the profile Pulse runs in, not the card's: a card from no chat
+    in a bot's report, sent to a chat of Pulse's own profile, is read there."""
+    bot_home = live.home / "profiles" / "nahida"
+    bot_home.mkdir(parents=True)
+    bot = StateDB(bot_home, FIXTURE_SCHEMA)
+    bot.session("bot-report", title="Pulse", pinned=0)
+    news = "The dentist is Friday at 9 (calendar)."
+    card_id = live.store.add_card({"kind": "noticed", "level": "screen", "topic": "date", "title": news,
+                                   "news": news, "profile": "nahida", "chat_id": "bot-report", "message_id": 1,
+                                   "created_at": time.time()})
+    live.db.session(sid="picked", title="Bot Chat", pinned=0)
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at, chat={"profile": "", "id": "picked"}) is True
+    live.db.message("user", "Pulse reminded me: The dentist is Friday at 9.", sid="picked", at=acted_at + 5)
+    live.db.message("assistant", "Set a reminder for the dentist on Friday.", sid="picked", at=acted_at + 30)
+    said = llm_saying(done=True, why="the reminder is set")
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    [text] = said.calls
+    said_there = text.split("## Said in that chat since Do it")[1].split("\n## ")[0]
+    assert "Set a reminder for the dentist" in said_there and "the chat they picked" in said_there
+    assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+
+
+def test_do_it_names_only_a_chat_it_can_read(live):
+    assert followup.act_chat({"profile": "nahida", "id": " b1 "}) == ("nahida", "b1")
+    assert followup.act_chat({"id": "b1"}) == ("", "b1")
+    for wrong in (None, "b1", {"profile": "nahida"}, {"profile": 3, "id": "b1"}, {"id": ""}, {"id": "x" * 201}):
+        assert followup.act_chat(wrong) is None
+    # A profile that's gone: the check looks for a new chat by its subject, as before.
+    card_id = found_card(live)
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at, chat={"profile": "gone", "id": "bot-chat"}) is True
+    live.db.session(sid="new", title="New conversation", pinned=0)
+    live.db.message("user", "Pulse reminded me: The dentist is Friday at 9 (calendar).", sid="new", at=acted_at + 700)
+    live.db.message("assistant", "Set a reminder for the dentist on Friday, from your calendar.", sid="new",
+                    at=acted_at + 720)
+    said = llm_saying(done=True, why="the reminder is set")
+    run_acts(live, said, acted_at + 2 * followup.ACT_FIRST_S)
+    [text] = said.calls
+    assert "Do it opened a new one" in text and "Set a reminder for the dentist" in text
+
+
 def test_do_it_on_a_report_item_from_no_chat_leaves_pulses_chat_out_after_pulse_moves(live):
     card_id = found_card(live)
     live.store.set("home_session_key", "another")  # Pulse reports in another chat now
@@ -1429,6 +1494,33 @@ def test_do_it_on_a_card_from_a_kanban_worker_reads_the_new_chat_not_the_worker(
     assert "Unblocked Kanban task t_c64b17a2" in text and "a Kanban task's worker" in text
     assert "rate limited until 21:40" not in text.split("## Said in that chat since Do it")[1].split("##")[0]
     assert live.store.done_marks([card_id])[card_id]["done_by"] == "pulse"
+
+
+def test_do_it_on_a_kanban_worker_card_reads_the_bot_chat_the_app_names(live):
+    worker(live)
+    card_id = found_card(live, chat_id="worker", news="Kanban task t_c64b17a2 hasn't gone on.", topic="follow-up")
+    bot_home = live.home / "profiles" / "nahida"
+    bot_home.mkdir(parents=True)
+    bot = StateDB(bot_home, FIXTURE_SCHEMA)
+    bot.session("bot-chat", title="Bot Chat", pinned=0)
+    acted_at = time.time()
+    assert control.acted(live.store, card_id, now=acted_at, chat={"profile": "nahida", "id": "bot-chat"}) is True
+    bot.message("user", "Pulse reminded me: Kanban task t_c64b17a2 hasn't gone on.", sid="bot-chat", at=acted_at + 5)
+    bot.message("assistant", "Unblocked Kanban task t_c64b17a2.", sid="bot-chat", at=acted_at + 30)
+    said = llm_saying(done=True, why="unblocked")
+    run_acts(live, said, acted_at + followup.ACT_FIRST_S)
+    [text] = said.calls
+    said_there = text.split("## Said in that chat since Do it")[1].split("\n## ")[0]
+    assert "a Kanban task's worker" in said_there and "the chat they picked" in said_there
+    assert "Unblocked Kanban task t_c64b17a2." in said_there and "rate limited" not in said_there
+
+
+def test_a_second_do_it_naming_no_chat_goes_back_to_the_search(live):
+    card_id = found_card(live)
+    assert control.acted(live.store, card_id, now=time.time(), chat={"profile": "nahida", "id": "bot-chat"}) is True
+    assert live.store.act(card_id)["chat_id"] == "bot-chat"
+    assert control.acted(live.store, card_id, now=time.time() + 10) is True
+    assert (live.store.act(card_id)["chat_profile"], live.store.act(card_id)["chat_id"]) == (None, "")
 
 
 def test_do_it_on_a_worker_card_whose_new_chat_never_came_gives_up_as_unsent(live):
@@ -1908,6 +2000,45 @@ def test_a_report_item_found_on_its_own_and_put_off_is_read_before_it_comes_back
                                       "created_at": now})
     assert control.dismiss(live.store, brief_card, True, now=now, until="tomorrow") is True
     assert followup.return_rested(live.store, live.store.card(brief_card)["rest_until"] + 1) == [brief_card]
+
+
+def test_a_whole_report_put_off_is_read_before_it_comes_back_and_stays_away_once_its_days_passed(live):
+    live.store.set("memory", True)
+    now = time.time()
+    # Longer than a card's news is read at (NEWS_LIMIT): a report is read whole.
+    news = "Election Day today: no school. " + "The car payment posts tomorrow. " * 30 + "Renew the passport by June."
+    assert len(news) > followup.NEWS_LIMIT
+    old, fresh = (live.store.add_card({"kind": "report", "level": "screen", "news": news, "chat_id": SID,
+                                       "message_id": 1, "created_at": now}) for _ in range(2))
+    for card_id in (old, fresh):
+        assert followup.rest_read(live.store.card(card_id)) and not followup.read_first(live.store.card(card_id))
+        assert control.dismiss(live.store, card_id, True, now=now, until="next_week") is True
+    back_at = live.store.card(old)["rest_until"]
+    assert followup.return_rested(live.store, back_at + 1) == []  # both wait for their read
+    seen = []
+
+    def llm(instructions, text):
+        seen.append((instructions, text))
+        return {"stale": len(seen) == 1, "why": "both days have passed"}, 7
+
+    followup.check_rested(live.store, live.home, llm, zone=pulse.report.zone_for("UTC"), now=back_at + 1,
+                          still_leader=lambda: True, budget=10_000, done={})
+    assert len(seen) == 2 and all(news in text and "Held since: " in text for _, text in seen)
+    assert "has passed by \"Now\" and nothing in it is left for the user to do" in seen[0][0]
+    assert "is stale only when every part is" in seen[0][0]
+    # The first read found it out of date: it stays swiped away, for good, with no
+    # Done mark (Done and Undo don't take a whole report), and Put back still works.
+    assert live.store.done_marks([old, fresh]) == {}
+    assert live.store.card(old)["dismissed_at"] is not None and live.store.card(old)["rest_until"] is None
+    assert followup.return_rested(live.store, back_at + 86400) == []
+    assert control.dismiss(live.store, old, False, now=back_at + 2) is True
+    assert control.dismiss(live.store, old, True, now=back_at + 3) is True
+    assert live.store.card(fresh)["dismissed_at"] is None and live.store.card(fresh)["created_at"] == back_at + 1
+    # With memory off nothing reads, so it comes back as before.
+    live.store.set("memory", False)
+    later = live.store.add_card({"kind": "report", "level": "screen", "news": news, "created_at": now})
+    assert control.dismiss(live.store, later, True, now=now, until="tomorrow") is True
+    assert followup.return_rested(live.store, live.store.card(later)["rest_until"] + 1) == [later]
 
 
 def test_a_found_card_read_before_it_comes_back_isnt_read_again_in_that_run_or_the_next(live, monkeypatch):

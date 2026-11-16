@@ -6,21 +6,24 @@ room log is a fake of c73cbcc4's gateway/hosted_rooms.read_events, and the membe
 gateway/hosted_room_replicas' schema (verbatim) with ingest_page's refusals (9e01b44 and 930e5ed have the same).
 """
 import hashlib
+import itertools
 import json
 import logging
 import sqlite3
 import stat
 import types
+import uuid
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from test_room_bridge_member import NOW, ROOT, _load
-from test_room_invites import (BASE, FURINA, LAIFUS, LEGACY, MONAS, WORKY, _rooms, _sent, _started, api, draft_of,
-                               invite_of, invites_module, rooms, slot)
+from test_room_invites import (BASE, FURINA, LAIFUS, LEGACY, MONAS, WORKY, _listening, _rooms, _sent, _started, answer,
+                               api, draft, draft_of, invite_of, invites_module, rooms, slot)
 
 copies_module = _load("conduit_push.room_copies", ROOT / "room_copies.py")
+links_module = _load("conduit_push.room_links", ROOT / "room_links.py")
 
 assert rooms  # the fixture, imported for these tests
 
@@ -187,6 +190,72 @@ MEMBERS = [{"member_id": "default", "handle": "furina", "display_name": "Furina"
 
 
 # --- The home's pages, and the copies they make -------------------------------------------
+
+
+def test_the_start_goes_before_the_first_page_so_the_copy_is_made_at_once(copies):
+    # The pass that starts a room sends its start, then its first page: a member's Hermes drops a page for a room
+    # it hasn't heard started, which left the guest without the room for a minute (WAIT_S), until the next page.
+    _listening(copies)
+    room_id = draft(copies, links=("link1",))["room_id"]
+    answer(copies, "laifu", room_id, "link1", LAIFUS)
+    copies.log.add(room_id, "room.created", {"name": "Zoo trip"}, actor={"kind": "system", "id": "authority-control"})
+
+    copies.furina.pass_once()
+
+    assert [kind for link_id, kind in copies.wire.kinds("furina") if kind in ("room.start", "room.page")] == [
+        "room.start", "room.page"]
+    assert copy_of(copies, "laifu", room_id)["room_id"] == room_id
+
+
+def test_a_page_waits_for_its_start_the_mailbox_didnt_take(copies):
+    _listening(copies)
+    room_id = draft(copies, links=("link1",))["room_id"]
+    answer(copies, "laifu", room_id, "link1", LAIFUS)
+    copies.log.add(room_id, "room.created", {"name": "Zoo trip"}, actor={"kind": "system", "id": "authority-control"})
+    send = copies.furina.send
+
+    def refusing_starts(link_id, kind, body, message_id=None):
+        if kind == "room.start":
+            raise invites_module.room_links.LinkError("unreachable", "Couldn't reach the mailbox", 503)
+        return send(link_id, kind, body, message_id=message_id)
+
+    copies.furina.send = refusing_starts
+    copies.furina.pass_once()
+    assert draft_of(copies, room_id)["status"] == "started" and pages(copies) == []
+
+    copies.furina.send = send
+    copies.furina.pass_once()
+
+    assert [kind for link_id, kind in copies.wire.kinds("furina") if kind in ("room.start", "room.page")] == [
+        "room.start", "room.page"]
+    assert copy_of(copies, "laifu", room_id)["room_id"] == room_id
+
+
+def test_a_later_rooms_page_waits_for_its_start_too(copies, monkeypatch):
+    # Each room is held by its own start, not only the first room the pass looks at (they go in id order).
+    ids = (uuid.UUID(int=n) for n in itertools.count(1))
+    monkeypatch.setattr(invites_module.uuid, "uuid4", lambda: next(ids))
+    first = started(copies, links=("link1",))
+    copies.furina.pass_once()
+    _listening(copies)
+    room_id = draft(copies, links=("link1",))["room_id"]
+    assert first < room_id
+    answer(copies, "laifu", room_id, "link1", LAIFUS)
+    copies.log.add(room_id, "room.created", {"name": "Zoo trip"}, actor={"kind": "system", "id": "authority-control"})
+    say(copies, first, "Saturday at ten?")
+    send = copies.furina.send
+
+    def refusing_starts(link_id, kind, body, message_id=None):
+        if kind == "room.start":
+            raise invites_module.room_links.LinkError("unreachable", "Couldn't reach the mailbox", 503)
+        return send(link_id, kind, body, message_id=message_id)
+
+    copies.furina.send = refusing_starts
+    before = len(pages(copies))
+    copies.furina.pass_once()
+
+    sent = [body["room_id"] for _, body, _ in pages(copies)[before:]]
+    assert sent.count(room_id) == 0 and first in sent, "only the room whose start waits is held"
 
 
 def test_each_person_in_the_room_gets_its_log_and_keeps_a_copy(copies):
@@ -404,6 +473,94 @@ def test_someone_who_left_gets_no_more_pages_and_keeps_their_copy(copies):
     shown = copy_of(copies, "laifu", room_id)
     assert (shown["status"], shown["last_seq"]) == ("left", 1)
     assert texts(log_of(copies, "laifu", room_id)) == [None]
+
+
+def test_the_others_hear_who_left_or_was_taken_out(copies):
+    # Before room.out, Mona's Hermes knew only its own agents' status: Laifu showed as in after leaving.
+    room_id = started(copies)
+    copies.furina.pass_once()
+    assert _sent(copies, copies_module.OUT) == [], "nobody's out: nothing to tell"
+    copies.laifu.leave("link1", room_id, None)
+
+    copies.furina.pass_once()
+
+    [(link_id, body, _)] = _sent(copies, copies_module.OUT)
+    assert link_id == "link2" and body == {"v": 1, "room_id": room_id, "out": {slot("link1", 1): "left"}}
+    people = invites_module.people(copies.tmp_path / "mona", room_id)
+    assert {member["handle"]: member["status"] for member in people["members"]} == {
+        "furina": "in", "laifu": "left", "mona": "in"}
+    assert copy_of(copies, "mona", room_id)["out"] == {slot("link1", 1): "left"}
+    # Told once: the next pass sends nothing new.
+    copies.furina.pass_once()
+    assert len(_sent(copies, copies_module.OUT)) == 1
+    # Before the mailbox's hold could run out on it unread, it goes again, under a new id.
+    copies.clock.now += copies_module.OUT_AGAIN_S
+    copies.furina.pass_once()
+    sent = _sent(copies, copies_module.OUT)
+    assert len(sent) == 2 and sent[1][1] == body and sent[1][2] != sent[0][2]
+
+
+def test_who_left_goes_before_the_page_that_follows(copies):
+    room_id = started(copies)
+    copies.furina.pass_once()
+    copies.laifu.leave("link1", room_id, None)
+    say(copies, room_id, "Bye Laifu")
+    copies.clock.now += copies_module.WAIT_S
+
+    copies.furina.pass_once()
+
+    kinds = [kind for _, link, kind, _, _ in copies.wire.sent
+             if link == "link2" and kind in (copies_module.OUT, copies_module.PAGE)]
+    assert kinds[-2:] == [copies_module.OUT, copies_module.PAGE]
+
+
+def test_a_copy_keeps_who_was_out_once_its_invite_is_forgotten(copies):
+    room_id = started(copies)
+    copies.furina.pass_once()
+    copies.laifu.leave("link1", room_id, None)
+    copies.furina.pass_once()
+    with invites_module.Store(copies.tmp_path / "mona").update() as state:
+        state["invites"].clear()
+    shown = copy_of(copies, "mona", room_id)
+    assert shown["out"] == {slot("link1", 1): "left"}
+    assert all(copies_module.OUT_MARK not in member for member in shown["members"])
+
+
+def test_a_member_taken_out_is_out_on_everyones_copy(copies):
+    room_id = started(copies)
+    copies.furina.pass_once()
+    copies.furina.remove(room_id, "mona")
+
+    copies.furina.pass_once()
+
+    sent = {link_id: body["out"] for link_id, body, _ in _sent(copies, copies_module.OUT)}
+    assert sent == {"link1": {slot("link2", 1): "removed"}}, "Mona's own Hermes hears it from room.ended"
+    assert copy_of(copies, "laifu", room_id)["out"] == {slot("link2", 1): "removed"}
+    assert copy_of(copies, "mona", room_id)["out"] == {slot("link2", 1): "removed"}
+
+
+@pytest.mark.parametrize("body", [None, {"v": 1, "room_id": "r"}, {"v": 2, "room_id": "r", "out": {}},
+                                  {"v": 1, "room_id": "r", "out": {"m": "gone"}},
+                                  {"v": 1, "room_id": "r", "out": {}, "extra": 1},
+                                  {"v": 1, "room_id": "r", "out": {"m": []}},
+                                  {"v": 1, "room_id": "r", "out": {"m": {"x": 1}}},
+                                  {"v": True, "room_id": "r", "out": {}}])
+def test_a_room_out_that_isnt_one_is_dropped(copies, body):
+    room_id = started(copies)
+    copies.furina.pass_once()
+    if isinstance(body, dict):
+        body = {**body, "room_id": room_id}
+    copies.mona.handle(links_module.Received(link_id="link2", kind=copies_module.OUT, message_id="x", at=0,
+                                             body=body))
+    assert copy_of(copies, "mona", room_id)["out"] == {}
+
+
+def test_a_room_out_only_names_members_of_the_room(copies):
+    room_id = started(copies)
+    copies.furina.pass_once()
+    copies.mona.handle(links_module.Received(link_id="link2", kind=copies_module.OUT, message_id="x", at=0, body={
+        "v": 1, "room_id": room_id, "out": {slot("link1", 1): "removed", "someone-else": "left"}}))
+    assert copy_of(copies, "mona", room_id)["out"] == {slot("link1", 1): "removed"}
 
 
 def test_a_disbanded_room_pages_until_every_copy_has_its_end(copies):

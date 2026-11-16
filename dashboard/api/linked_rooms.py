@@ -361,6 +361,29 @@ async def delete_room_link(response: Response, link_id: Optional[str] = None) ->
     return await _room_links_route(lambda links: links.remove(link_id), "unlink", mailbox=True)
 
 
+@router.put("/rooms/links/own")
+async def put_room_link_own(request: Request, response: Response) -> Any:
+    """Marks a Link as the owner's own Hermes, or not (``link_id``, ``own``),
+    and tells the other side: ``link`` as the list shows it, with ``own``
+    (this side), ``their_own`` and ``own_link`` (both sides, which is what
+    lifts the owner's room rules). 404 for a Link this Hermes doesn't have."""
+    response.headers["Cache-Control"] = "no-store"
+    body = _room_links_body(await core._read_json_body(request, ROOM_LINKS_MAX_BODY_BYTES),
+                            '{"link_id": ..., "own": true|false}')
+    if not isinstance(body.get("link_id"), str) or type(body.get("own")) is not bool:
+        raise HTTPException(status_code=400, detail="Expected link_id and own: true or false",
+                            headers={"Cache-Control": "no-store"})
+
+    def mark(links: Any) -> Dict[str, Any]:
+        shown = links.set_own(body.get("link_id"), body["own"])
+        if shown is None:
+            raise core._plugin_package_module("room_links").LinkError(
+                "not_found", "This Hermes has no such Link", 404)
+        return {"link": shown}
+
+    return await _room_links_route(mark, "own", mailbox=True)
+
+
 @router.delete("/rooms/links/invites")
 async def delete_room_link_invite(response: Response, invite_id: Optional[str] = None) -> Any:
     """Takes an invite back before it's used."""
@@ -470,7 +493,18 @@ async def post_room_draft(request: Request, response: Response, profile: Optiona
         exc.headers = {**(exc.headers or {}), "Cache-Control": "no-store"}
         raise
     return await _room_invites_route(profile, lambda rooms: {"draft": rooms.draft(
-        body.get("name"), body.get("agents"), body.get("links"), where=where)}, "draft", mailbox=True)
+        body.get("name"), body.get("agents"), body.get("links"), where=where, bring=body.get("bring"))},
+        "draft", mailbox=True)
+
+
+@router.get("/rooms/own-bots")
+async def get_room_own_bots(response: Response) -> Any:
+    """The bots of your own other Hermes, by Link (room_own_bots): each own
+    Link's name, the bots its Hermes last said it has (each ``{profile,
+    handle, display_name, ready}``) and whether a draft may bring them
+    (``brings``), so New Group Chat lists them beside yours."""
+    response.headers["Cache-Control"] = "no-store"
+    return await _room_invites_route(None, lambda rooms: rooms.own_bots.theirs(), "own_bots")
 
 
 @router.get("/rooms/drafts")
@@ -514,12 +548,14 @@ async def get_room_invites(response: Response) -> Any:
 async def post_room_invite_answer(request: Request, response: Response) -> Any:
     """Joins the room ``room_id`` the Link ``link`` invited this Hermes to
     with ``agents`` (each ``{profile, handle, display_name}``, with its
-    ``choices``, or null for the join card's), or declines it with none."""
+    ``choices``, or null for the join card's), or declines it with none;
+    ``just_me`` true joins with no agents."""
     response.headers["Cache-Control"] = "no-store"
     body = _room_links_body(await core._read_json_body(request, ROOM_INVITES_MAX_BODY_BYTES),
                             '{"link": ..., "room_id": ..., "agents": [...]}')
     return await _room_invites_route(None, lambda rooms: {"invite": rooms.answer(
-        body.get("link"), body.get("room_id"), body.get("agents"))}, "answer", mailbox=True)
+        body.get("link"), body.get("room_id"), body.get("agents"), body.get("just_me", False))}, "answer",
+        mailbox=True)
 
 
 @router.post("/rooms/leave")
@@ -568,8 +604,9 @@ async def put_room_looks(request: Request, response: Response) -> Any:
     """How your agents and you look to the other people in rooms over
     Links: ``agents``, profile to ``{picture, color}`` (a JPEG or PNG of at
     most 8 KB, base64, and ``#RRGGBB``, each null when there's none), and
-    ``person``, yours. It takes the place of what was sent before, and goes
-    to each started room's people on the rooms loop's next pass."""
+    ``person``, yours. Each one sent takes the place of what was sent
+    before and one left out stays, and what changed goes to each started
+    room's people on the rooms loop's next pass."""
     response.headers["Cache-Control"] = "no-store"
     body = await core._read_json_body(request, ROOM_LOOKS_MAX_BODY_BYTES)
     looks = core._plugin_package_module("room_looks")
@@ -581,9 +618,13 @@ async def get_room_looks(response: Response, room_id: Optional[str] = None) -> A
     """How a room over Links looks: ``members``, member id to ``{picture,
     color}`` for other people's agents; ``people``, each other person but
     the host as ``{name, poster, look}``; and ``home``, the host's look
-    when it isn't you. Empty until their Hermes sends them."""
+    when it isn't you. Empty until their Hermes sends them. Without
+    ``room_id``, ``person``: your own look, as one of your devices last
+    gave it, for each of them to show (capability room-looks-you)."""
     response.headers["Cache-Control"] = "no-store"
     looks = core._plugin_package_module("room_looks")
+    if room_id is None:
+        return await _room_invites_route(None, lambda rooms: looks.you(rooms.root), "your look")
     return await _room_invites_route(None, lambda rooms: looks.shown(rooms.root, room_id), "room looks")
 
 

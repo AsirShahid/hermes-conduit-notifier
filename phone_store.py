@@ -74,6 +74,7 @@ import secrets
 import sqlite3
 import threading
 import time
+import unicodedata
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
@@ -1336,6 +1337,11 @@ class PhoneStore:
         return {"status": _decode(row[0], None), "status_at": row[1], "focus": _decode(row[2], None),
                 "focus_at": row[3]}
 
+    def last_contact(self, db: sqlite3.Connection, device: str) -> int | None:
+        """When the device last checked in or uploaded (epoch seconds)."""
+        row = db.execute(f"SELECT {_IN_TOUCH} FROM devices WHERE id=?", (device,)).fetchone()
+        return (row[0] or None) if row else None
+
     def shortcuts(self, db: sqlite3.Connection, device: str) -> tuple[list[dict[str, Any]], int | None]:
         """The Shortcuts the user lets Hermes run, and when they were sent."""
         row = db.execute("SELECT shortcuts, shortcuts_at FROM devices WHERE id=?", (device,)).fetchone()
@@ -1377,7 +1383,9 @@ class PhoneStore:
         the text in the picture, the place and the kind (screenshot); a
         photo with more of them ranks higher, and one with none is left out.
         ``start``/``end``: when it was taken, epoch seconds, end excluded."""
-        words = list(dict.fromkeys(re.findall(r"\w+", query.casefold()))) if query else []
+        # Full-width and half-width forms (what a Japanese IME types against
+        # text a photo shows, digits included) read as one: NFKC on both sides.
+        words = list(dict.fromkeys(re.findall(r"\w+", _folded(query)))) if query else []
         if query and query.strip() and not words:
             # Only punctuation or emoji: nothing can match it.
             return [], 0
@@ -1400,7 +1408,7 @@ class PhoneStore:
             if words:
                 # Whole words, so "cat" doesn't find "category"; a singular
                 # finds its plural and back.
-                haystack = " ".join([*map(str, labels), row[5] or "", row[6] or "", row[2]]).casefold()
+                haystack = _folded(" ".join([*map(str, labels), row[5] or "", row[6] or "", row[2]]))
                 tokens = set(re.findall(r"\w+", haystack))
                 # Text without spaces between words (Japanese, Chinese) is
                 # one token: any word, a number or name included, is
@@ -1423,7 +1431,14 @@ _VES_PLURALS = {singular: plural for singular, plural in (
     ("leaf", "leaves"), ("loaf", "loaves"), ("knife", "knives"), ("wife", "wives"), ("life", "lives"),
     ("half", "halves"), ("shelf", "shelves"), ("wolf", "wolves"), ("calf", "calves"), ("thief", "thieves"),
     ("elf", "elves"), ("self", "selves"), ("scarf", "scarves"), ("hoof", "hooves"), ("sheaf", "sheaves"),
+    ("dwarf", "dwarves"), ("wharf", "wharves"),
 )}
+
+
+def _folded(text: str) -> str:
+    """Text as photo search compares it: NFKC, so full-width ``カフェ`` and
+    ``２０２４`` match half-width ``ｶﾌｪ`` and ``2024``, then casefolded."""
+    return unicodedata.normalize("NFKC", text).casefold()
 
 
 def _word_forms(word: str) -> set[str]:
@@ -1837,7 +1852,7 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
         raise PhoneError("malformed", f"sharing.calendar must be one of {', '.join(CALENDAR_SHARING)}")
     sharing: dict[str, Any] = {"calendar": calendar}
     for field in ("reminders", "details", "attendee_emails", "status", "focus", "auto_add", "alarms", "contacts",
-                  "shortcuts", "shortcuts_auto", "contacts_edit", "photos", *READ_ONLY_SHARING):
+                  "shortcuts", "shortcuts_auto", "contacts_edit", "photos", "turn_status", *READ_ONLY_SHARING):
         sharing[field] = bool(_bool(value.get(field), f"sharing.{field}", False))
     # Add-only and read-only leaves nothing; read-only reminders need reminders.
     if sharing["calendar"] == "write_only" and sharing["calendar_read_only"]:
@@ -1850,6 +1865,8 @@ def _parse_sharing(value: Any) -> dict[str, Any]:
     sharing["shortcuts_auto"] = sharing["shortcuts_auto"] and sharing["shortcuts"]
     # Changing contacts is part of sharing them.
     sharing["contacts_edit"] = sharing["contacts_edit"] and sharing["contacts"]
+    # With each message: only what the status and Focus already share.
+    sharing["turn_status"] = sharing["turn_status"] and (sharing["status"] or sharing["focus"])
     sharing["past_days"] = _whole(value.get("past_days"), "sharing.past_days", 0, MAX_WINDOW_DAYS)
     sharing["future_days"] = _whole(value.get("future_days"), "sharing.future_days", 0, MAX_WINDOW_DAYS)
     return sharing

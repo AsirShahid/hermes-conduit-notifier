@@ -4,6 +4,7 @@ Hermes' runs API, and the runs it admitted watched and sent back.
 Hermes' runs API is a fake of c73cbcc4's (its answers, statuses and error codes), and the Link a fake that keeps
 what's sent; test_two_loads_handle_each_request_once runs over the real mailbox.
 """
+import os
 import base64
 import hashlib
 import http.server
@@ -15,7 +16,6 @@ import logging
 import pathlib
 import stat
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -26,7 +26,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")
@@ -573,6 +573,20 @@ def test_the_daily_limit_tells_once_then_passes(laifu, hermes):
     assert notice["run"]["output"] == NOTICE and quiet["run"]["output"] == PASS
     assert [call["key"] for call in hermes.calls_to("POST", "/v1/runs")] == ["room:t1:1", "room:t4:1"]
     assert next_day["run"]["status"] == "queued"
+
+
+def test_a_room_of_only_your_own_hermes_runs_as_at_home(laifu, hermes, monkeypatch):
+    # Multi-instance plan, Rooms 1: no sitting out and no turns a day there.
+    asked = []
+    monkeypatch.setattr(member_module.room_rules, "own_guest_room",
+                        lambda root, room_id, link_id=None: asked.append((room_id, link_id)) or True)
+    choose(laifu, takes_part="listens", daily_limit=1)
+
+    admit(laifu, "t1")
+    admit(laifu, "t2")
+
+    assert [call["key"] for call in hermes.calls_to("POST", "/v1/runs")] == ["room:t1:1", "room:t2:1"]
+    assert asked[0] == ("room-zoo", "link1")
 
 
 def test_a_retried_dispatch_counts_once_toward_the_limit(laifu, hermes):

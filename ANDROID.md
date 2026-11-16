@@ -2,7 +2,19 @@
 
 Source: `AsirShahid/hermes-conduit-notifier`, branch `android`. The phone app is `AsirShahid/hermes-conduit`, branch `android`.
 
-## Differences from upstream 0.162.0
+## Following upstream
+
+This fork follows upstream every night. `~/.hermes/scripts/conduit_plugin_sync.py` (cron job "Conduit plugin: nightly upstream sync") merges `main` of kaishi00/hermes-conduit-notifier into the live plugin at `~/.hermes/plugins/conduit_push`, runs the checks, and puts the result live when no chat is running. Agents working here: load the `conduit-plugin-upstream-sync` skill.
+
+Rules that keep that merge automatic:
+
+- The version in `plugin.yaml` and `dashboard/manifest.json`, and all of `CHANGELOG.md`, belong to upstream. A fork change never bumps the version and never adds a `CHANGELOG.md` entry. Describe it at the top of `FORK_CHANGELOG.md` under `## YYYY-MM-DD: short title`. The sync resets all three files to upstream's on every merge. For fork work this replaces the version-bump rule in CONTRIBUTING.md.
+- The apps gate fork features on capability ids (`ROUTE_CAPABILITIES`), never on a version number: the number is upstream's.
+- Prefer a new file to an edit. When an upstream file must change, add lines instead of rewriting upstream's, and keep a fork addition to a list or tuple on lines of its own. Where both sides only added lines the sync keeps both. Where both rewrote the same lines it stops and asks Asir.
+- Fork tests go in their own test functions or files, not inside upstream's assertions.
+- Commit fork work in the live checkout (`~/.hermes/plugins/conduit_push`, a detached HEAD). Never leave uncommitted edits there overnight: the sync skips a dirty tree. After each sync, `~/projects/hermes-conduit-notifier` branch `android` is fast-forwarded to what is live.
+
+## Differences from upstream
 
 - Authenticated, profile-scoped `/push/android/register` and `/push/android/unregister`. Registration stores endpoints and per-phone secrets in an owner-only file. Status returns no endpoint or secret.
 - UnifiedPush delivery retains the app's existing E2E protocol and optional RFC 8291 Web Push encryption. The Apple relay receives no Android endpoint or Android key.

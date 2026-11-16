@@ -1,9 +1,9 @@
+import os
 import asyncio
 import importlib.util
 import json
 import pathlib
 import sys
-import tempfile
 import threading
 import types
 
@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 
 spec = importlib.util.spec_from_file_location("conduit_plugin_api_self_update", ROOT / "dashboard" / "plugin_api.py")
@@ -517,13 +517,15 @@ def test_another_process_loading_the_file_leaves_a_live_job_alone(tmp_path):
 
 
 def test_a_dashboard_that_cant_restart_itself_refuses(monkeypatch, tmp_path):
-    monkeypatch.setattr(api.self_update.sys, "platform", "win32")
+    monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
     with pytest.raises(api.core.TokenError) as raised:
         api.self_update.start_self_update(None, lambda *a: None, path=tmp_path / "job.json", steps=(dict, _restarted))
     assert raised.value.status == 501
 
 
-def test_a_hermes_without_the_steps_refuses():
+def test_a_hermes_without_the_steps_refuses(monkeypatch):
+    # Also inside a real Hermes install, which has them (notifier #322).
+    monkeypatch.setitem(sys.modules, "hermes_cli.plugins_cmd", None)
     with pytest.raises(api.core.TokenError) as raised:
         api.self_update._hermes_update_steps()
     assert raised.value.status == 501

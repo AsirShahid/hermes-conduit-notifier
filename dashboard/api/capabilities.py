@@ -70,6 +70,9 @@ ROUTE_CAPABILITIES = (
     "pulse_nudge",
     "pulse_done",
     "pulse_acted",
+    # /pulse/acted takes "chat": the chat Do it used for a card from no chat
+    # (a bot's Bot Chat), which the Do it check reads.
+    "pulse_acted_chat",
     # POST /pulse/dismiss, cards' "brief" and "dismissed_at", Pulse push labels with a count.
     "pulse_dismiss",
     # The morning brief at PUT /pulse's brief_time comes every day with what's still open.
@@ -166,6 +169,9 @@ ROUTE_CAPABILITIES = (
     # sharing.photos, a batch's "photos" ({full, upsert, delete}) and
     # "photo_files" (a picture the user said yes to), and the send_photo change.
     "phone-photos",
+    # sharing.turn_status: the phone's battery, Low Power Mode, CarPlay and
+    # Focus go with each message sent from Conduit, on one line (issue 888).
+    "phone-turn-status",
     "location-sync",
     "location-locate",
     # sharing.other_profiles: the host's other profiles paired with the
@@ -208,6 +214,9 @@ ROUTE_CAPABILITIES = (
     "speech-server",
     "local-live-agent",
     "artifacts",
+    # /artifacts/pins: artifacts saved in Conduit, with a copy of each file
+    # kept on the host (hermes-conduit#2467).
+    "artifact-pins",
     # /workspace/*: the Folder tab's listings, search, recent files and file actions.
     "workspace-files",
     # GET /workspace/resolve: where a file a reply names by its name is, from
@@ -224,6 +233,9 @@ ROUTE_CAPABILITIES = (
     # GET /model-usage: how much each model was used, by the provider picked (not
     # a fallback's), weighted to recent use, for Favorites in the model sheet.
     "model-usage",
+    # POST /workspace/duplicate with "to": a copy pasted into another folder,
+    # keeping its name there when free (hermes-conduit#1438).
+    "workspace-copy",
     "local-live",
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).
@@ -233,6 +245,13 @@ ROUTE_CAPABILITIES = (
     # /rooms/identity and /rooms/links: Links between this installation and
     # other people's, for Linked Rooms (no profile: they're the installation's).
     "room-links",
+    # PUT /rooms/links/own: a Link between your own Hermes; a room whose
+    # other installations all came over Links both sides marked runs without
+    # the owner's room rules (multi-instance plan, Rooms 1).
+    "room-own-links",
+    # GET /rooms/own-bots and /rooms/drafts' bring: your other Hermes' bots
+    # over an own Link, listed in New Group Chat and joining by themselves.
+    "room-own-bots",
     # GET/POST /rooms/setup: this Hermes' API server, a profile's room
     # ceiling and approvals, set up for Linked Rooms.
     "room-setup",
@@ -261,6 +280,10 @@ ROUTE_CAPABILITIES = (
     # GET/PUT /rooms/looks: your bots' pictures and glow colors and yours,
     # sent to the people in your rooms over Links, and theirs (Linked Rooms).
     "room-looks",
+    # GET /rooms/looks without room_id: your own picture for rooms, kept on
+    # this Hermes for all your devices; PUT /rooms/looks keeps what a body
+    # leaves out (a device's bots' looks without a person keep yours).
+    "room-looks-you",
     # GET/PUT /rooms/chats: a room's private chat with one of your agents,
     # told which room it's about, with notes on rooms it Listens in
     # (Linked Rooms).
@@ -378,4 +401,31 @@ async def get_capabilities(response: Response) -> Dict[str, Any]:
         body["managed"] = True
         if managed:
             body["managed_by"] = managed
+    if _room_chats_kept():
+        body["room_chats_kept"] = True
+    degraded = _degraded()
+    if degraded:
+        body["degraded"] = degraded
     return body
+
+
+def _degraded() -> list:
+    """What the plugin can't do on this Hermes right now (degraded.py's
+    codes: `workstream-recovery`, `workspace-files`), so Conduit's plugin
+    page says what otherwise only the host's log does. None when that
+    can't be read."""
+    try:
+        return [code for code in core._plugin_package_module("degraded").current() if isinstance(code, str)]
+    except Exception:  # noqa: BLE001 — the capabilities answer never fails for it
+        return []
+
+
+def _room_chats_kept() -> bool:
+    """Whether this host keeps a disbanded Conduit room's hidden chats
+    (cleanup_disbanded_rooms: off, room_settings), so Disband's warning
+    doesn't say they're deleted. Only Conduit's rooms have that warning, and
+    conduit_rooms_only never leaves them out. No when that can't be read."""
+    try:
+        return core._plugin_package_module("room_settings").cleanup_disbanded() == "off"
+    except Exception:  # noqa: BLE001 - the warning Conduit shows by default
+        return False

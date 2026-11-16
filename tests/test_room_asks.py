@@ -61,6 +61,9 @@ def exchange(store, installation=PHONE, features=("room-asks",), results=()):
     return store.exchange({"installation_id": installation, "features": list(features), "results": list(results)})
 
 
+WOKEN = []   # (prompt id, room) for each ask the tool left waiting, watched for its answer
+
+
 def call(store, sleeper, pushes, args=ASK, *, session_id=ROOM_SESSION, turn=TURN, share="ask", tools="talk",
          is_child=lambda _: False):
     choices = room_choices.RoomChoices(share=share, tools=tools)
@@ -70,7 +73,8 @@ def call(store, sleeper, pushes, args=ASK, *, session_id=ROOM_SESSION, turn=TURN
 
     return json.loads(asks.handle(args, session_id=session_id, is_child=is_child, room_turn=room_turn,
                                   choices=lambda _turn: choices, room_name=lambda _room: "Zoo trip", store=store,
-                                  push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic))
+                                  push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic,
+                                  wake=lambda prompt_id, turn: WOKEN.append((prompt_id, turn.room_id))))
 
 
 def answer_while_waiting(store, sleeper, outcome, after=5.0, **result):
@@ -128,10 +132,20 @@ def test_no_conduit_that_can_is_refused_with_what_to_say(store, sleeper, pushes)
     assert pushes == [] and store.status() == []
 
 
+def test_an_ask_left_waiting_is_watched_so_its_answer_starts_a_turn(store, sleeper, pushes):
+    exchange(store)
+    WOKEN.clear()
+    answer = call(store, sleeper, pushes)
+    assert answer["status"] == "waiting" and "a turn of yours in this room starts with their answer" in answer["note"]
+    assert WOKEN == [(answer["id"], "zoo-trip")]
+
+
 def test_the_answer_within_the_wait_comes_back(store, sleeper, pushes):
     exchange(store)
     answer_while_waiting(store, sleeper, "confirmed")
+    WOKEN.clear()
     answer = call(store, sleeper, pushes)
+    assert WOKEN == [], "answered in this turn: nothing to wake it for"
     assert answer["status"] == "confirmed" and "share exactly" in answer["note"].lower()
     assert sleeper.now < asks.WAIT_S
     # Heard once its turn replies: the next turn isn't told again.
@@ -169,7 +183,7 @@ def test_an_unanswered_ask_says_to_check_later(store, sleeper, pushes):
     exchange(store)
     answer = call(store, sleeper, pushes)
     assert answer["status"] == "waiting" and sleeper.now == pytest.approx(asks.WAIT_S)
-    assert "you'll check with your owner" in answer["note"] and "before your next turn" in answer["note"]
+    assert "you'll check with your owner" in answer["note"] and "a turn of yours in this room starts" in answer["note"]
 
 
 def test_a_later_answer_frames_the_next_turn_once(store, sleeper, pushes, clock):
@@ -277,6 +291,10 @@ def test_the_tool_refuses_outside_a_room_and_in_a_subagent(store, sleeper, pushe
     assert call(store, sleeper, pushes, session_id="")["error"] == "not_room"
     alone = rules.RoomTurn(room_id="zoo-trip", side="home", with_others=False, session_id=ROOM_SESSION)
     assert call(store, sleeper, pushes, turn=alone)["error"] == "not_room"
+    # A room of only the owner's own Hermes (room_rules._lifted): told to just use its tools, never "not a room".
+    own = rules.RoomTurn(room_id="zoo-trip", side="member", with_others=False, session_id=ROOM_SESSION, own=True)
+    refused = call(store, sleeper, pushes, turn=own)
+    assert refused["error"] == "own_room" and "usual tools" in refused["note"]
     # A member's room session not titled with its room yet is still a room: never told to ask "the user" there.
     untitled = rules.RoomTurn(room_id="", side="member", with_others=True, session_id=ROOM_SESSION)
     refused = call(store, sleeper, pushes, turn=untitled)
@@ -515,7 +533,8 @@ def test_a_local_member_session_hermes_hasnt_titled_is_answered_quietly(store, s
     with caplog.at_level("WARNING", logger="hermes.plugins.conduit_push"):
         answer = json.loads(asks.handle(ASK, session_id=ROOM_SESSION, room_turn=untitled,
                                         choices=lambda _: room_choices.RoomChoices(), store=store,
-                                        push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic))
+                                        push=pushes.append, sleep=sleeper.sleep, monotonic=sleeper.monotonic,
+                                  wake=lambda prompt_id, turn: WOKEN.append((prompt_id, turn.room_id))))
     assert answer["error"] == "unavailable" and "can't share that" in answer["note"]
     assert caplog.records == []
 

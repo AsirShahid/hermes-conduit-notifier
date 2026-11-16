@@ -27,7 +27,7 @@ WORKSTREAMS_WINDOW_S = 60.0
 # A refusal's code -> its HTTP status. The body has the code, so Conduit
 # words it, and the note.
 REFUSAL_STATUS = {"no_such_work": 404, "missing": 400, "unknown_action": 404, "off": 409, "busy": 409,
-                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "unavailable": 503, "hermes": 502, "invalid": 400, "taken": 409}
+                  "not_now": 409, "starting": 409, "still_running": 409, "too_long": 413, "open_elsewhere": 409, "mid_turn": 409, "maybe_sent": 409, "unavailable": 503, "hermes": 502, "invalid": 400, "taken": 409}
 
 # The panel's reads and the user's actions count apart, so reading often
 # never holds up a Stop.
@@ -96,8 +96,9 @@ async def get_workstreams(request: Request, response: Response, profile: Optiona
     with its status, checklist, last result, the ``actions`` the user can
     take and how they can file it (``manage``: pin, unpin, resolve,
     reopen); ``counts`` for the Work strip (working, needs_you, ready,
-    waiting); ``resolved_count``; ``policy`` ("off" when the bot's
-    workstreams are off), ``bot_chat`` and ``coordination`` (its ``mode``
+    waiting, and questions: what the Bot Chat asked the user and waits on); ``resolved_count``; ``policy`` ("off" when the bot's
+    workstreams are off), ``bot_chat``, ``bot_chat_agents`` (the background
+    agents the Bot Chat itself started, for Bots Home) and ``coordination`` (its ``mode``
     and ``items``: what the watch flagged, what the Bot Chat sent on its own
     and asked the user over the last day, each with the lines behind it).
     ``resolved=1``: the Resolved
@@ -198,7 +199,12 @@ async def post_workstream_action(ref: str, action: str, request: Request, respon
     approval its "Needs you" card shows); or ``pin``, ``unpin``, ``resolve`` (work
     still at it is refused, ``still_running``) and ``reopen``, for asks
     too. The answer has the row as it is now
-    (``work``); a refusal is a 4xx with ``code`` and ``detail``."""
+    (``work``); a refusal is a 4xx with ``code`` and ``detail``.
+
+    With a question's id for ``ref`` (P1, from ``coordination``'s items, whose
+    ``actions`` name these while it's open): ``approve`` or ``decline``, the
+    user's own answer to what the Bot Chat asked them. A yes goes to the Bot
+    Chat as a work update it acts on; the answer has ``id`` and ``status``."""
     response.headers["Cache-Control"] = "no-store"
     profile = await core._conduit_route_profile_no_store(request, profile)
     body = await core._read_json_body(request, WORKSTREAMS_MAX_BODY_BYTES)

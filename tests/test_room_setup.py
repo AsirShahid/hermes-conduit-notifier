@@ -1,6 +1,7 @@
 """Setting a Hermes up for rooms with other people's agents: the API server,
 each agent's room ceiling and approvals, and the gateway restart
 (designs/cross-owner-agents, N3c, decision 13)."""
+import os
 import argparse
 import contextlib
 import hashlib
@@ -9,7 +10,6 @@ import json
 import logging
 import pathlib
 import sys
-import tempfile
 import threading
 import types
 
@@ -23,7 +23,7 @@ BASE = "/api/plugins/conduit_push"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "conduit_push" not in sys.modules:
     _pkg = types.ModuleType("conduit_push")
@@ -133,7 +133,7 @@ class FakeHermes:
     def policy(self, profile, home):
         # execution_policy_mapping, from the profile's own config.yaml.
         if self.policy_fails:
-            raise RuntimeError("gateway config is invalid")
+            raise getattr(self, "policy_error", RuntimeError)("gateway config is invalid")
         config = _yaml(home / "config.yaml")
         saved = (config.get("platform_toolsets") or {}).get("api_server")
         named = [name for name in saved if name != "no_mcp"] if isinstance(saved, list) else ["hermes-api-server"]
@@ -193,6 +193,7 @@ def hermes(tmp_path, monkeypatch):
     fake = FakeHermes(root)
     fake.ports = Ports()
     monkeypatch.setattr(setup, "_answers", fake.ports.answers)
+    monkeypatch.setattr(setup, "_policy_failures", set())
     monkeypatch.delenv("HERMES_YOLO_MODE", raising=False)
     return fake
 
@@ -613,7 +614,10 @@ def test_a_plugin_toolset_can_be_in_the_ceiling(hermes):
 def test_choices_are_the_toolsets_room_turns_can_have(hermes):
     choices = _state(hermes)["choices"]
     assert [choice["id"] for choice in choices] == ["web", "terminal", "vision", "x_search", "session_search", "a2a"]
-    assert choices[0] == {"id": "web", "label": "Web Search & Scraping", "description": "web_search, web_extract"}
+    assert choices[0] == {"id": "web", "label": "Web Search & Scraping", "description": "web_search, web_extract",
+                          "lookup": True, "never": []}
+    # A room's Look things up and Search my past chats use these; the rest only a Custom choice.
+    assert [choice["id"] for choice in choices if choice["lookup"]] == ["web", "vision", "x_search", "session_search"]
 
 
 def test_choices_leave_out_toolsets_rooms_never_use(hermes):
@@ -625,6 +629,8 @@ def test_choices_leave_out_toolsets_rooms_never_use(hermes):
     ids = [choice["id"] for choice in _state(hermes)["choices"]]
     assert "memory" not in ids and "code_execution" not in ids
     assert "skills" in ids and "a2a" in ids     # some tools rooms can use; tools Hermes can't list here
+    skills = next(choice for choice in _state(hermes)["choices"] if choice["id"] == "skills")
+    assert skills["never"] == ["skill_manage"] and skills["lookup"] is False
     with pytest.raises(setup.SetupError) as refused:
         _apply(hermes, ceiling=["memory"])
     assert refused.value.code == "bad_ceiling" and hermes.config_writes == []
@@ -1092,6 +1098,28 @@ def test_the_policy_is_null_when_hermes_cant_read_it(hermes, caplog):
     assert "RuntimeError" in caplog.text
 
 
+def test_a_policy_that_keeps_failing_is_logged_once_until_it_reads_again(hermes, caplog):
+    # The own-bots check reads each profile's state every minute: .52 logged one failure 1,300 times
+    # (2026-11-15).
+    hermes.policy_fails = True
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            assert _state(hermes)["policy"] is None
+        hermes.policy_error = ConnectionError  # failing another way still counts as the same failure
+        assert _state(hermes)["policy"] is None
+        hermes.policy_error = RuntimeError
+        assert _state(hermes, "laifu")["policy"] is None
+    told = [record for record in caplog.records if "room policy" in record.getMessage()]
+    assert [record.getMessage().split("profile ")[1].split("'")[0] for record in told] == ["default", "laifu"]
+    caplog.clear()
+    hermes.policy_fails = False
+    with caplog.at_level(logging.WARNING):
+        assert _state(hermes)["policy"] is not None
+        hermes.policy_fails = True
+        assert _state(hermes)["policy"] is None
+    assert caplog.text.count("room policy") == 1
+
+
 # --- Hermes without these calls ---------------------------------------------------------
 
 
@@ -1151,6 +1179,11 @@ def client(hermes, monkeypatch):
     hermes_cli = types.ModuleType("hermes_cli")
     hermes_cli.__path__ = []
     monkeypatch.setitem(sys.modules, "hermes_cli", hermes_cli)
+    # Inside a real Hermes install its profile scope and plugin gate would
+    # still load behind the stand-in package, against these stand-in modules
+    # (notifier #322).
+    for name in ("hermes_cli.web_server_profiles", "hermes_cli.web_server_dashboard"):
+        monkeypatch.setitem(sys.modules, name, None)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server_gateway", gateway)
     monkeypatch.setitem(sys.modules, "hermes_cli.web_server", web_server)
     app = FastAPI()
@@ -1552,7 +1585,8 @@ def _hermes_cli_modules(monkeypatch, detach=True):
     for name, module in modules.items():
         monkeypatch.setitem(sys.modules, name, module)
     if not detach:
-        monkeypatch.delitem(sys.modules, "hermes_cli.gateway_runtime_start", raising=False)
+        # None, not missing: inside a real Hermes install its own would load (notifier #322).
+        monkeypatch.setitem(sys.modules, "hermes_cli.gateway_runtime_start", None)
 
 
 def test_the_restart_runs_in_the_background_where_hermes_can(monkeypatch):

@@ -54,6 +54,19 @@ router = core.router
 # speech-to-text or TTS is not enough on its own.
 
 GPT_LIVE_URL = "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
+# Codex's GA Live endpoint (Conduit issue 2236). ChatGPT moves accounts to it
+# one at a time: for a moved account the URL above refuses with "GA Live
+# requests must use /backend-api/codex/live/sessions", while others still use
+# it. So the plugin tries the old URL first and, only on that refusal, starts
+# the call here. A GA session speaks the GA Live events (as the API key's
+# does) and replaces the request's instructions with its own, so the answer
+# says `events: "ga"` and `briefing_applied: false`, and Conduit sends the
+# briefing with session.instructions.append once the call starts.
+GPT_LIVE_GA_URL = "https://chatgpt.com/backend-api/codex/live/sessions"
+_GPT_LIVE_GA_REFUSAL = "/backend-api/codex/live/sessions"
+# Enough of a refusal's body to find that sentence. It's never logged or
+# passed on: it could echo account details.
+GPT_LIVE_MAX_ERROR_BYTES = 4096
 GPT_LIVE_DEFAULT_MODEL = "gpt-live-1-codex"
 GPT_LIVE_DEFAULT_VOICE = "cove"
 GPT_LIVE_TIMEOUT_S = 30.0
@@ -67,7 +80,9 @@ GPT_LIVE_WORKERS = 2
 GPT_LIVE_MAX_BODY_BYTES = 640 * 1024
 GPT_LIVE_MAX_HISTORY_ITEMS = 40
 GPT_LIVE_MAX_ANSWER_BYTES = 64 * 1024
-# Bounds how long Conduit waits (a 504), above the socket timeout. It can't
+# Bounds how long Conduit waits (a 504), above the socket timeout. An account
+# on Codex's GA endpoint takes two exchanges (the old URL's refusal, then the GA
+# URL), so its start can hold a worker for two socket timeouts. It can't
 # interrupt a Hermes call already running on a worker (a token refresh, the
 # upstream exchange), so a Hermes call that never returns holds its worker
 # until the process restarts. Status has its own pool: a stuck session never
@@ -354,6 +369,23 @@ def gpt_live_session_config(history: Optional[list], live: Dict[str, Any]) -> Di
     return config
 
 
+def gpt_live_ga_session_config(history: Optional[list], live: Dict[str, Any]) -> Dict[str, Any]:
+    """The ``session`` object for Codex's GA endpoint: the public GA API's shape
+    (seeded history as ``input``) with the subscription's model and voice. The
+    instructions still go, in case GA ever reads them; Conduit appends its
+    briefing either way."""
+    model, voice = _gpt_live_model_voice(live)
+    config: Dict[str, Any] = {
+        "model": model,
+        "instructions": _gpt_live_instructions(live),
+        "audio": {"output": {"voice": voice}},
+        "delegation": {"type": "client"},
+    }
+    if history:
+        config["input"] = history
+    return config
+
+
 class _GPTLiveAnsweredError(core.TokenError):
     """OpenAI answered 2xx but its answer couldn't be read: a session may have started."""
 
@@ -369,7 +401,7 @@ def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
         return (_GPTLiveAnsweredError if answered else core.TokenError)(502, message + GPT_LIVE_NO_FALLBACK)
 
     try:
-        with gemini_qwen_live._opener.open(request, timeout=GPT_LIVE_TIMEOUT_S) as response:
+        with gemini_qwen_live._provider_opener().open(request, timeout=GPT_LIVE_TIMEOUT_S) as response:
             answered = 200 <= response.status < 300
             # An SDP answer is a few KB; one byte over the cap is refused, not buffered.
             answer = response.read(GPT_LIVE_MAX_ANSWER_BYTES + 1)
@@ -377,10 +409,15 @@ def _post_sdp(url: str, headers: Dict[str, str], body: Dict[str, Any]) -> tuple:
                 raise failed("GPT-Live returned an invalid WebRTC answer. ")
             return response.status, answer.decode("utf-8", "replace"), response.headers.get("Location", "")
     except urllib.error.HTTPError as exc:
-        # The body can echo account details; only the status goes back to Conduit.
+        # The body can echo account details: only the status goes back to Conduit, and the
+        # caller only looks for the GA refusal in it.
         status = exc.code
+        try:
+            detail = exc.read(GPT_LIVE_MAX_ERROR_BYTES).decode("utf-8", "replace")
+        except Exception:
+            detail = ""
         exc.close()
-        return status, "", ""
+        return status, detail, ""
     except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
         # http.client.HTTPException covers a chunked body cut off mid-read (IncompleteRead).
         if answered:
@@ -399,13 +436,17 @@ def _valid_answer(sdp: Any, call_id: Any) -> bool:
             and isinstance(call_id, str) and _GPT_LIVE_CALL_ID.fullmatch(call_id) is not None)
 
 
-def _plugin_gpt_live_session(sdp: str, config: Dict[str, Any], post: Callable[..., tuple]) -> Dict[str, Any]:
+def _plugin_gpt_live_session(sdp: str, config: Dict[str, Any], post: Callable[..., tuple],
+                             ga_config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     token, account = _codex_credentials()
-    status, answer, location = post(GPT_LIVE_URL, {
+    headers = {
         "Authorization": f"Bearer {token}",
         "ChatGPT-Account-Id": account,
         "OpenAI-Alpha": "quicksilver=v2",
-    }, {"sdp": sdp, "session": config})
+    }
+    status, answer, location = post(GPT_LIVE_URL, headers, {"sdp": sdp, "session": config})
+    if 400 <= status < 500 and _GPT_LIVE_GA_REFUSAL in answer:
+        return _plugin_gpt_live_ga_session(sdp, ga_config if ga_config is not None else config, post, headers)
     if not 200 <= status < 300:
         logger.warning("GPT-Live session was rejected: HTTP %s", status)
         raise core.TokenError(502, f"GPT-Live session was rejected (HTTP {status}); check the Codex sign-in "
@@ -414,6 +455,37 @@ def _plugin_gpt_live_session(sdp: str, config: Dict[str, Any], post: Callable[..
     if not _valid_answer(answer, call_id):
         raise core.TokenError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
     return {"auth": "subscription", "session": {"id": call_id}, "transport": {"type": "webrtc", "sdp": answer}}
+
+
+def _plugin_gpt_live_ga_session(sdp: str, config: Dict[str, Any], post: Callable[..., tuple],
+                                headers: Dict[str, str]) -> Dict[str, Any]:
+    """The call on Codex's GA endpoint, for an account the old URL turned away."""
+    logger.info("GPT-Live: this account is on Codex's GA endpoint")
+    status, text, location = post(GPT_LIVE_GA_URL, headers,
+                                  {"session": config, "transport": {"type": "webrtc", "sdp": sdp}})
+    if not 200 <= status < 300:
+        logger.warning("GPT-Live GA session was rejected: HTTP %s", status)
+        raise core.TokenError(502, f"GPT-Live session was rejected (HTTP {status}); check the Codex sign-in "
+                              "and the account's voice access. " + GPT_LIVE_NO_FALLBACK)
+    # The public GA API answers JSON with the session and its SDP; an answer that is the SDP
+    # itself, with the call in Location, as the old endpoint's, is read too.
+    if text.startswith("v=0"):
+        answer_sdp, session_id = text, urllib.parse.urlparse(location).path.rstrip("/").rsplit("/", 1)[-1]
+    else:
+        try:
+            answer = json.loads(text)
+        except ValueError:
+            answer = None
+        session = answer.get("session") if isinstance(answer, dict) else None
+        transport = answer.get("transport") if isinstance(answer, dict) else None
+        session_id = session.get("id") if isinstance(session, dict) else None
+        answer_sdp = transport.get("sdp") if isinstance(transport, dict) else None
+    if (not isinstance(answer_sdp, str) or not answer_sdp.startswith("v=0")
+            or not isinstance(session_id, str) or not session_id or len(session_id) > GPT_LIVE_API_SESSION_ID_MAX
+            or not session_id.isprintable()):
+        raise _GPTLiveAnsweredError(502, "GPT-Live returned an invalid WebRTC answer. " + GPT_LIVE_NO_FALLBACK)
+    return {"auth": "subscription", "session": {"id": session_id}, "transport": {"type": "webrtc", "sdp": answer_sdp},
+            "events": "ga"}
 
 
 def _clean_billing(billing: Any) -> str:
@@ -589,6 +661,110 @@ def _clean_briefing(briefing: Any) -> Optional[str]:
     return briefing or None
 
 
+# --- What a subscription session is seeded with ---------------------------------
+#
+# gpt-live-1-codex doesn't read the session's `instructions` (notifier#719):
+# the only place it takes Conduit's briefing is a developer message in the
+# seeded items, the same `initial_items` that carry the history. Codex allows
+# those items 8,192 estimated tokens in all, and every size limit before this
+# one was a guess in another unit (the app's 32 K characters, the request's
+# 64 K, a 500-token context append) that a long memory went past (Conduit
+# issue 1077, then notifier#719). So this budget is the one source of truth:
+# `_seeded_items` is the only thing that builds a subscription session's
+# items, on the plugin's exchange and Hermes' alike, and whatever Conduit (the
+# iPhone, the Watch or an older build) sends, it fits it here.
+CODEX_ITEMS_MAX_TOKENS = 8192
+# Codex estimates; the margin keeps a slightly different count under its cap.
+CODEX_ITEMS_MARGIN_TOKENS = 512
+CODEX_ITEMS_BUDGET_TOKENS = CODEX_ITEMS_MAX_TOKENS - CODEX_ITEMS_MARGIN_TOKENS
+# The newest history the briefing can't push out: the app seeds at most 6,000
+# characters of a chat's turns (issue 1983), about 1,600 tokens as items.
+CODEX_HISTORY_MAX_TOKENS = 2048
+_CLIP_MARKER = "\n[…]"
+
+
+def _estimated_tokens(items: list) -> int:
+    """Codex's estimate is about 4 bytes a token. The items are counted as the
+    plugin posts them (json.dumps' defaults: keys, escapes, and every non-ASCII
+    character as a 6- or 12-byte \\u escape), which is at or above the UTF-8
+    bytes of the text and at or above a tokenizer's count for CJK and emoji."""
+    return -(-len(json.dumps(items).encode("ascii")) // 4)
+
+
+def _briefing_item(text: str) -> Dict[str, Any]:
+    return {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}
+
+
+def _clip_block(briefing: str, tag: str, over_bytes: int) -> tuple:
+    """(briefing with the body of its <tag> block shortened by at least
+    over_bytes, at a line break when there is one and marked as cut, or
+    dropped with the block when too little is left; whether it changed).
+    The app's own clip does the same at its limit."""
+    opening, closing = f"\n<{tag}>\n", f"\n</{tag}>"
+    start = briefing.find(opening)
+    end = briefing.find(closing, start + len(opening)) if start >= 0 else -1
+    if start < 0 or end < 0:
+        return briefing, False
+    body = briefing[start + len(opening):end].removesuffix(_CLIP_MARKER)
+    encoded = body.encode("utf-8")
+    keep = len(encoded) - over_bytes - len(_CLIP_MARKER.encode("utf-8"))
+    if keep <= 200:
+        # The block goes, with the one-line bracketed note just before it that introduces it
+        # (the app always sends one). A bracketed line that doesn't name the block stays.
+        note = briefing.rfind("\n", 0, start)
+        intro = briefing[note + 1:start]  # the first line when note is -1
+        names_it = ("memory" if tag == "hermes_memory" else "personality") in intro.lower()
+        cut_from = max(note, 0) if intro.startswith("[") and intro.endswith("]") and names_it else start
+        return briefing[:cut_from] + briefing[end + len(closing):], True
+    kept = encoded[:keep].decode("utf-8", "ignore")
+    line = kept.rfind("\n")
+    if line > len(kept) // 2:
+        kept = kept[:line]
+    return briefing[:start + len(opening)] + kept + _CLIP_MARKER + briefing[end:], True
+
+
+def _seeded_items(history: Optional[list], briefing: Optional[str]) -> tuple:
+    """(the session's seeded items, whether the briefing is in them, whether it
+    was clipped), within CODEX_ITEMS_BUDGET_TOKENS.
+
+    The briefing goes first, as a developer message. History keeps its newest
+    items within CODEX_HISTORY_MAX_TOKENS (the whole budget without a
+    briefing); then what Hermes remembers is cut,
+    then the persona, so Conduit's rules, the call's own blocks and the
+    language rule always go whole. A briefing whose rules alone don't fit is
+    left out (and reported so), and Conduit sends it as context instead, as
+    it does for any host that doesn't take one."""
+    kept: list = []
+    history_room = CODEX_HISTORY_MAX_TOKENS if briefing else CODEX_ITEMS_BUDGET_TOKENS
+    for item in reversed(history or []):
+        if _estimated_tokens([item, *kept]) > history_room:
+            break
+        kept.insert(0, item)
+    if not briefing:
+        return kept, False, False
+    text, clipped = briefing, False
+    for tag in ("hermes_memory", "hermes_persona"):
+        while True:
+            over = _estimated_tokens([_briefing_item(text), *kept]) - CODEX_ITEMS_BUDGET_TOKENS
+            if over <= 0:
+                return [_briefing_item(text), *kept], True, clipped
+            text, changed = _clip_block(text, tag, over * 4)
+            if not changed:
+                break
+            clipped = True
+    return kept, False, False
+
+
+def _items_carry_briefing(config: Any, briefing: Optional[str]) -> bool:
+    """True only when the built config's seeded items open with the briefing
+    item, so Conduit never drops a briefing Hermes left out."""
+    if not briefing:
+        return False
+    session = _built_session(config)
+    items = session.get("initial_items", session.get("input"))
+    return isinstance(items, list) and bool(items) and items[0] == _briefing_item(briefing)
+
+
 def _built_session(config: Any) -> Dict[str, Any]:
     """The session block of a Hermes-built config, which may or may not wrap it in "session"."""
     if not isinstance(config, dict):
@@ -604,15 +780,6 @@ def _built_voice(config: Any) -> Optional[str]:
     if not isinstance(voice, str) or _GPT_LIVE_VOICE.fullmatch(voice.strip().lower()) is None:
         return None
     return voice.strip().lower()
-
-
-def _built_has_instructions(config: Any, text: Optional[str]) -> bool:
-    """True only when Hermes' config really carries the text (the briefing), so
-    Conduit never drops it unsent."""
-    if not text:
-        return False
-    instructions = _built_session(config).get("instructions")
-    return isinstance(instructions, str) and text in instructions
 
 
 def create_gpt_live_session(
@@ -640,9 +807,11 @@ def create_gpt_live_session(
     live = {**_gpt_live_settings(), "auth": billing}
     if voice:
         live["voice" if billing == "api" else "subscription_voice"] = voice
-    if briefing:
-        # Part of the session's instructions, so the model has it before the first word:
-        # sent as context appends after the call starts, it answers each chunk out loud.
+    if briefing and billing == "api":
+        # Part of the session's instructions, which the public API's model reads, so it has
+        # it before the first word: sent as context appends after the call starts, it answers
+        # each chunk out loud. The subscription's model doesn't read them: its briefing is a
+        # seeded item (_seeded_items).
         extra = str(live.get("instructions") or "").strip()
         live["instructions"] = f"{extra}\n\n{briefing}" if extra else briefing
     # A call that opens with the model talking (a greeting, or a call Hermes
@@ -660,10 +829,13 @@ def create_gpt_live_session(
                                      briefing_applied=bool(briefing), greeting_applied=False)
     # Echoed back so Conduit can tell a host that applied the chosen voice from one that ignored it.
     applied_voice = _gpt_live_model_voice(live)[1]
+    items, briefing_seeded, briefing_clipped = _seeded_items(history, briefing)
+    seeded = items[0] if briefing_seeded else None
     upstream = _upstream_voice_live()
     if upstream is not None:
         try:
-            config = upstream.build_session_config(history, live=live)
+            # Hermes seeds the items it's given, the briefing first among them.
+            config = upstream.build_session_config(items or None, live=live)
             result = upstream._create_subscription_session(sdp, config)
         except Exception as exc:
             # Only the type is logged: Hermes' text could quote a provider response.
@@ -681,11 +853,22 @@ def create_gpt_live_session(
         # Only the fields Conduit reads: nothing else Hermes returns leaves the host.
         return {"auth": "subscription", "session": {"id": session["id"]},
                 "transport": {"type": "webrtc", "sdp": transport["sdp"]}, "source": "hermes",
-                "voice": applied_voice, "briefing_applied": _built_has_instructions(config, briefing),
-                "greeting_applied": False}
-    config = gpt_live_session_config(history, live)
-    return {**_plugin_gpt_live_session(sdp, config, post or _post_sdp), "source": "plugin", "voice": applied_voice,
-            "briefing_applied": bool(briefing), "greeting_applied": False}
+                "voice": applied_voice,
+                "briefing_applied": seeded is not None and _items_carry_briefing(config, seeded["content"][0]["text"]),
+                "briefing_clipped": briefing_clipped, "greeting_applied": False}
+    config = gpt_live_session_config(items or None, live)
+    # Codex's GA endpoint drops the request's instructions, and whether it reads seeded items
+    # is unverified, so it gets the history alone: Conduit appends the briefing as
+    # instructions once the call starts (Conduit issue 2236).
+    ga_config = gpt_live_ga_session_config(_seeded_items(history, None)[0] or None, live)
+    result = _plugin_gpt_live_session(sdp, config, post or _post_sdp, ga_config)
+    if result.get("events") == "ga":
+        return {**result, "source": "plugin", "voice": applied_voice,
+                "briefing_applied": False, "briefing_clipped": False, "greeting_applied": False}
+    # briefing_applied is True only when the briefing is in the session's items; when its rules
+    # alone didn't fit, False has Conduit send it as context after the start, as for any host.
+    return {**result, "source": "plugin", "voice": applied_voice,
+            "briefing_applied": briefing_seeded, "briefing_clipped": briefing_clipped, "greeting_applied": False}
 
 
 @router.get("/gpt-live/status")

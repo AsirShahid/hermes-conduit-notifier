@@ -59,7 +59,9 @@ router = core.router
 # and {"type": "end"}. Host to Watch: "started" (engine, model, voice,
 # input_rate, output_rate; for GPT-Live also briefing_applied and
 # greeting_applied: always false now, so the Watch opens a greeting or a call
-# from Hermes with its own turn (notifier #541); for Local Live session_id, the call's chat, and
+# from Hermes with its own turn (notifier #541), and events "ga" for a session
+# on Codex's GA endpoint, whose events the Watch then speaks, appending the
+# briefing itself (Conduit issue 2236); for Local Live session_id, the call's chat, and
 # resumed), "ended" (reason) and
 # "error" (code, message). The Watch waits for "started" before it sends
 # audio or events. It owns the conversation, as the phone does: it speaks each
@@ -754,7 +756,20 @@ class _GptLiveWatchSession(_WatchAudioSession):
             finally:
                 self.live = False
                 await helper.close()
-        raise WatchAudioFailure("unreachable", "GPT-Live's audio connection didn't come up from the Hermes host")
+        raise self._unreachable()
+
+    def _unreachable(self) -> "WatchAudioFailure":
+        """The call never connected. Codex answers the offer for a voice the ChatGPT plan
+        doesn't offer and then never connects it, so a chosen voice is named (Conduit issue 2388)."""
+        message = "GPT-Live's audio connection didn't come up from the Hermes host"
+        try:
+            voice = gpt_live._clean_voice(self.request.get("voice"))
+        except core.TokenError:
+            voice = None
+        if voice:
+            message += (f". If your ChatGPT plan doesn't offer the voice {voice.capitalize()}, "
+                        "pick another in GPT-Live's settings")
+        return WatchAudioFailure("unreachable", message)
 
     async def _connect(self, helper: _GptLiveHelper, *, retry: bool) -> bool:
         """True once WebRTC is up; False to try again with STUN (or when stopped)."""
@@ -791,16 +806,10 @@ class _GptLiveWatchSession(_WatchAudioSession):
         if retry:
             logger.info("GPT-Live for the Watch didn't connect with host candidates; trying STUN")
             return False
-        raise WatchAudioFailure("unreachable", "GPT-Live's audio connection didn't come up from the Hermes host")
+        raise self._unreachable()
 
     async def _started(self, helper: _GptLiveHelper) -> None:
-        answer = self.answer
-        await self.bridge.control(self.stream, {
-            "type": "started", "engine": self.engine, "voice": answer.get("voice"),
-            "input_rate": GPT_LIVE_WATCH_INPUT_RATE, "output_rate": GPT_LIVE_WATCH_OUTPUT_RATE,
-            "briefing_applied": bool(answer.get("briefing_applied")),
-            "greeting_applied": bool(answer.get("greeting_applied")),
-        })
+        await self.bridge.control(self.stream, _gpt_live_started(self.engine, self.answer))
         # What came while "started" was on its way, in order, then live.
         while self.held:
             kind, plain = self.held.pop(0)
@@ -816,6 +825,18 @@ class _GptLiveWatchSession(_WatchAudioSession):
         helper = self.helper
         if helper is not None and self.live:
             await helper.write("E", data)
+
+
+def _gpt_live_started(engine: str, answer: Dict[str, Any]) -> Dict[str, Any]:
+    """The "started" control for a GPT-Live session the host started."""
+    return {
+        "type": "started", "engine": engine, "voice": answer.get("voice"),
+        "input_rate": GPT_LIVE_WATCH_INPUT_RATE, "output_rate": GPT_LIVE_WATCH_OUTPUT_RATE,
+        "briefing_applied": bool(answer.get("briefing_applied")),
+        "greeting_applied": bool(answer.get("greeting_applied")),
+        # Codex's GA endpoint: the Watch speaks the GA events and appends the briefing.
+        **({"events": "ga"} if answer.get("events") == "ga" else {}),
+    }
 
 
 class _WatchAudioPacer:
@@ -1058,6 +1079,7 @@ async def _connect_watch_audio_relay(url: str, credential: str) -> Any:
 
         def status_of(exc: Any) -> int:
             return int(getattr(exc, "status_code", 0) or 0)
+    kwargs.update(core._proxy_websocket_kwargs(url, connect))
     try:
         return await connect(url, max_size=WATCH_AUDIO_MAX_MESSAGE_BYTES, open_timeout=WATCH_AUDIO_RELAY_TIMEOUT_S,
                              compression=None, **kwargs)

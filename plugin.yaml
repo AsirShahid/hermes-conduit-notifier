@@ -1,6 +1,6 @@
 name: conduit_push
 manifest_version: 1
-version: 0.165.0
+version: 0.177.19
 description: "Send Hermes lifecycle notifications to Conduit devices."
 author: Hermes Conduit
 kind: standalone
@@ -13,6 +13,7 @@ provides_hooks:
   - post_tool_call
   - post_llm_call
   - on_session_end
+  - on_session_finalize
   - pre_approval_request
   - subagent_start
   - subagent_stop
@@ -50,9 +51,29 @@ provides_tools:
   - work_close
   - work_ask
   - work_reply
+  - work_tell
   - work_note
   - work_propose
   - work_progress
   - conduit_room_work
 provides_middleware:
   - tool_execution
+config_schema:
+  cleanup_disbanded_rooms:
+    type: str
+    choices: [delete, "off"]
+    default: delete
+    label: Disbanded rooms' hidden chats
+    description: >-
+      delete removes this host's agents' hidden sessions for a group room once
+      it's disbanded; off keeps them, as Hermes alone would. Read from the root
+      profile.
+  conduit_rooms_only:
+    type: bool
+    default: false
+    label: Only Conduit's rooms
+    description: >-
+      On keeps the plugin's room changes (the memory guard, the owner rules for
+      rooms with other people's agents, and the disband cleanup) to rooms
+      Conduit made, for a Hermes others use group rooms on too. Read from the
+      root profile.

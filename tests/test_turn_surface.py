@@ -1,9 +1,9 @@
 """Where in Conduit a turn's message was sent (hermes-conduit#888)."""
+import os
 import contextvars
 import importlib.util
 import pathlib
 import sys
-import tempfile
 import types
 
 import pytest
@@ -15,7 +15,7 @@ BASE = "/api/plugins/conduit_push"
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools.clarify_tool" not in sys.modules:
     _tools = sys.modules.setdefault("tools", types.ModuleType("tools"))
@@ -109,6 +109,8 @@ def gateway(monkeypatch):
     gateway.install(monkeypatch)
     # The data-sharing line reads stores this test doesn't set up.
     monkeypatch.setattr(plugin.conduit_first, "note", lambda: None)
+    # So does the phone's state with each message.
+    monkeypatch.setattr(plugin.phone_tool, "turn_note", lambda: None)
     return gateway
 
 
@@ -140,6 +142,10 @@ def test_the_line_names_the_surface_and_how_it_was_entered():
         "form, and they may leave some blank.]")
     assert surfaces.line("siri") == "[Conduit: this message came from Siri or a Shortcut.]"
     assert "likely driving" in surfaces.line("carplay", "spoken")
+    # The Pulse widget's Do it: a tap, never typed or spoken, in Conduit's words.
+    assert surfaces.line("widget") == (
+        "[Conduit: this message came from a button the user tapped on a Conduit widget, in words Conduit wrote. "
+        "Conduit isn't open: the user reads the answer later, in this chat.]")
 
 
 def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
@@ -149,7 +155,9 @@ def test_a_typed_message_on_a_screen_hears_that_open_questions_show_as_a_form():
         # Conduit says was typed hears it.
         assert surfaces.FORM_HINT not in surfaces.line(surface, "spoken")
         assert surfaces.FORM_HINT not in surfaces.line(surface)
-    for surface in ("watch", "carplay", "siri", "wear", "android_auto"):
+    for surface in ("watch", "carplay", "siri", "widget"):
+        assert surfaces.FORM_HINT not in surfaces.line(surface, "typed")
+    for surface in ("wear", "android_auto"):  # the Android fork's small surfaces, kept apart from upstream's list
         assert surfaces.FORM_HINT not in surfaces.line(surface, "typed")
 
 
@@ -245,6 +253,16 @@ def test_the_turn_of_the_reported_message_says_where_it_came_from_once(gateway, 
     assert gateway.turn(CONDUIT, "Find a charger") == surfaces.line("carplay", "spoken")
     # Taken by that turn: the same text sent again says nothing until Conduit reports again.
     assert gateway.turn(CONDUIT, "Find a charger") == ""
+
+
+def test_the_phones_state_follows_the_line_only_on_a_turn_conduit_sent(gateway, client, monkeypatch):
+    monkeypatch.setattr(plugin.phone_tool, "turn_note", lambda: "[phone state]")
+    client.post(f"{BASE}/turn-surface", json=_report("carplay", "Find a charger", "spoken"))
+    assert gateway.turn(CONDUIT, "Find a charger") == surfaces.line("carplay", "spoken") + "\n[phone state]"
+    # No report, no line: nothing says this turn came from Conduit.
+    assert gateway.turn(CONDUIT, "Find a charger") == ""
+    client.post(f"{BASE}/turn-surface", json=_report("watch", "same words", "spoken"))
+    assert gateway.turn(DESKTOP, "same words") == ""
 
 
 def test_a_report_never_labels_another_messages_turn(gateway, client):

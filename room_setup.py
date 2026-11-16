@@ -37,7 +37,7 @@ import re
 import secrets
 import socket
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Optional
@@ -400,18 +400,24 @@ def _answers(host: str, port: int) -> bool:
         return False
 
 
-def _never_used(hermes: Hermes, key: str) -> bool:
-    """Whether every tool of a toolset is one rooms never allow (memory,
-    running code, delegation, scheduled jobs). One Hermes can't list here (a
-    plugin's, from the dashboard) stays a choice."""
+# The tools a room's Look things up (and Use my data) and Search my past chats turn on: a toolset with one is a
+# lookup, which rooms use without Custom. (room_rules.LOOK_TOOLS and SEARCH_TOOL.)
+LOOKUP_TOOLS = frozenset({"web_search", "web_extract", "x_search", "vision_analyze", "session_search"})
+
+
+def _toolset_tools(hermes: Hermes, key: str) -> set[str]:
+    """A toolset's tools, or none when Hermes can't list them here (a plugin's, from the dashboard)."""
     try:
-        tools = {str(name) for name in hermes.toolset_tools(key)}
-    except Exception:  # noqa: BLE001 - unknown, so it stays
-        return False
-    return bool(tools) and tools <= room_choices.NEVER
+        return {str(name) for name in hermes.toolset_tools(key)}
+    except Exception:  # noqa: BLE001 - unknown
+        return set()
 
 
 def _choices(hermes: Hermes) -> list[dict]:
+    """The toolsets the ceiling can name, each with whether it's a ``lookup`` (one a room's Look things up or
+    Search my past chats uses; the rest run only where a room's Custom choice names their tools) and the tools
+    of it rooms ``never`` run (memory, running code, delegation, scheduled jobs, changing skills). A toolset of
+    those alone isn't one."""
     rows: list[dict] = []
     seen: set[str] = set()
     for row in hermes.toolsets():
@@ -419,10 +425,13 @@ def _choices(hermes: Hermes) -> list[dict]:
         key = str(key)
         if key in seen or key == OWN_TOOLSET or key in _ALWAYS or key in SETTINGS_ONLY or not hermes.allowed(key):
             continue
-        if _never_used(hermes, key):
+        tools = _toolset_tools(hermes, key)
+        if tools and tools <= room_choices.NEVER:
             continue
         seen.add(key)
-        rows.append({"id": key, "label": hermes.label(str(label)), "description": str(description)})
+        rows.append({"id": key, "label": hermes.label(str(label)), "description": str(description),
+                     "lookup": bool(tools & LOOKUP_TOOLS) if tools else key in DEFAULT_CEILING,
+                     "never": sorted(tools & room_choices.NEVER)})
     return rows
 
 
@@ -692,12 +701,29 @@ def _plan(hermes: Hermes, home: Path, profile: str, ceiling: Any, mcp_servers: A
                  needs=needs, blockers=blockers, changed=changed)
 
 
+# The profiles whose room policy read failed, so one that keeps failing (the own-bots check reads each
+# profile's every minute), however it fails, is logged once, and again only once it read and failed anew.
+_policy_failures: set[str] = set()
+_policy_failures_lock = threading.Lock()
+
+
 def _policy(hermes: Hermes, home: Path, profile: str) -> Optional[dict]:
     try:
-        return dict(hermes.policy(profile, Path(home)))
+        policy = dict(hermes.policy(profile, Path(home)))
     except Exception as exc:  # noqa: BLE001 - the state still answers, without the policy
-        logger.warning("Linked Rooms setup couldn't read profile %s's room policy (%s)", profile, type(exc).__name__)
+        why = type(exc).__name__
+        with _policy_failures_lock:
+            told = profile in _policy_failures
+            _policy_failures.add(profile)
+        if told:
+            logger.debug("Linked Rooms setup still can't read profile %s's room policy (%s)", profile, why)
+        else:
+            logger.warning("Linked Rooms setup couldn't read profile %s's room policy (%s)", profile, why,
+                           exc_info=True)
         return None
+    with _policy_failures_lock:
+        _policy_failures.discard(profile)
+    return policy
 
 
 def _view(hermes: Hermes, home: Path, profile: str, plan: _Plan) -> dict:
@@ -814,6 +840,23 @@ def local_api_url(hermes: Hermes, home: Path, profile: str) -> str:
     root = room_identity.root_home(Path(home))
     server = _server(hermes, root, hermes.read_config(root / "config.yaml"), dict(hermes.read_env(root / ".env")))
     return server.url if profile == "default" else f"{server.url}/p/{quote(profile, safe='')}"
+
+
+def profile_scope(profile: str) -> Any:
+    """Hermes' scope for reading ``profile``'s config and secrets (its home and .env), the one Conduit's
+    routes enter for a ?profile= (dashboard/api/core._profile_scope): for work off any request, such as the
+    own-bots check and a join a room.bring starts in the rooms loop. Once the dashboard has served another
+    profile it hosts several, and a secret read with no scope raises UnscopedSecretError (a profile config's
+    ${VAR} references, its room policy). Inside a route's scope for the same profile it changes nothing; the
+    default profile gets the dashboard's own launch scope. A Hermes without profile hosting has nothing to
+    scope."""
+    try:
+        from hermes_cli.web_server_profiles import _config_profile_scope
+    except ImportError as exc:
+        if exc.name not in ("hermes_cli", "hermes_cli.web_server_profiles"):
+            raise
+        return nullcontext()
+    return _config_profile_scope(profile)
 
 
 def profile_name(home: Path) -> str:

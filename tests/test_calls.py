@@ -1,8 +1,8 @@
+import os
 import importlib.util
 import json
 import pathlib
 import sys
-import tempfile
 import threading
 import time
 import types
@@ -13,7 +13,7 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools" not in sys.modules:
     _tools = types.ModuleType("tools")
@@ -760,7 +760,7 @@ def test_register_adds_the_tool_and_its_skill():
                                                   "conduit_phone", "conduit_contacts", "conduit_photos", "conduit_room",
                                                   "conduit_ask_owner", "conduit_free_busy", "conduit_ask_linked",
                                                       "work_list", "work_start", "work_send", "work_stop", "work_read",
-                                                      "work_close", "work_ask", "work_reply", "work_note", "work_propose", "work_progress",
+                                                      "work_close", "work_ask", "work_reply", "work_tell", "work_note", "work_propose", "work_progress",
                                                       "conduit_room_work"]
     tool = tools[0]
     assert (tool["toolset"], tool["schema"]["name"]) == ("conduit", "conduit_call_user")
@@ -800,7 +800,7 @@ def test_a_hermes_without_the_display_fields_still_gets_the_tool(home, paired):
                                            "conduit_contacts", "conduit_photos", "conduit_room", "conduit_ask_owner",
                                            "conduit_free_busy", "conduit_ask_linked", "work_list", "work_start",
                                            "work_send", "work_stop", "work_read", "work_close", "work_ask",
-                                           "work_reply", "work_note", "work_propose", "work_progress", "conduit_room_work"]
+                                           "work_reply", "work_tell", "work_note", "work_propose", "work_progress", "conduit_room_work"]
     handler = tools[0][1]
     _settings(home)
     # Hermes passes the agent itself as parent_agent; only a child session is refused.
@@ -1073,7 +1073,9 @@ def test_the_hook_takes_the_note_with_the_kwargs_hermes_passes(home, clock):
     assert result["context"].startswith("[Conduit: the user declined the phone call you placed just now.")
 
 
-def test_a_voice_turn_after_a_missed_call_gets_both_notes(home, clock):
+def test_a_voice_turn_after_a_missed_call_gets_both_notes(home, clock, monkeypatch):
+    # The plugin's own note wording, even where Hermes' tools.voice_live has its own (notifier #322).
+    monkeypatch.setattr(plugin, "_voice_live_prefix", plugin._VOICE_LIVE_NOTE_PREFIX)
     calls._store(home).record_outcome(CALL_ID, ["rt-1"], "missed", age_s=0)
     voice = "[Note: this message is a delegation from a live spoken conversation ...]\n\nhi"
     context = plugin._pre_llm_call(session_id="rt-1", conversation_history=[{"role": "user", "content": voice}])["context"]
@@ -1561,3 +1563,58 @@ def test_the_plugins_own_work_update_isnt_at_a_screen_because_desktop_has_it_ope
         assert calls._at_screen(home, ["st-1"]) is False
     finally:
         calls.turn_surface.start_turn("st-1")
+
+
+# A chat's close (notifier issue 820): Hermes says on_session_end with no turn
+# named, and skips it while another chat's close holds its gate.
+@pytest.fixture
+def turns_marked(monkeypatch):
+    monkeypatch.setattr(sys.modules["conduit_push.pulse"], "turns_marked", True)
+
+
+def test_a_chat_closed_after_its_turn_ended_stops_nothing(home, fake, turns_marked):
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", turn_id="t1", completed=True, failed=False, interrupted=False)
+    _watch(home, "rt-1")
+    # Hermes' finalize, then on_session_finalize: the turn's own end settled
+    # it, so the close is no stopped turn of its own.
+    plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
+    plugin._on_session_finalize(session_id="rt-1")
+    assert fake.sent == []
+    assert fake.enqueued == []
+
+
+def test_a_chat_closed_mid_turn_ends_it_stopped_once(home, fake, turns_marked):
+    _watch(home, "rt-1")
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
+    plugin._on_session_finalize(session_id="rt-1")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+
+
+def test_a_chat_closed_mid_turn_ends_it_when_hermes_skipped_on_session_end(home, fake, turns_marked):
+    _watch(home, "rt-1")
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    # The gate skipped this chat's on_session_end: only the finalize arrives.
+    plugin._on_session_finalize(session_id="rt-1", platform="tui")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+    plugin._on_session_finalize(session_id="rt-1", platform="tui")
+    assert len(fake.sent) == 1
+
+
+def test_a_hermes_that_marks_no_turns_still_stops_on_a_close(home, fake, monkeypatch):
+    monkeypatch.setattr(sys.modules["conduit_push.pulse"], "turns_marked", False)
+    _watch(home, "rt-1")
+    plugin._on_session_end(session_id="rt-1", completed=False, interrupted=True)
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]
+
+
+def test_a_turn_whose_start_was_forgotten_still_ends_on_its_close(home, fake, turns_marked):
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t1", conversation_history=[])
+    plugin._on_session_end(session_id="rt-1", turn_id="t1", completed=True, failed=False, interrupted=False)
+    plugin._pre_llm_call(session_id="rt-1", turn_id="t2", conversation_history=[])
+    # Hours in, or past the cap: its start is gone, but its end never came.
+    plugin._end_parent_turn("rt-1")
+    _watch(home, "rt-1")
+    plugin._on_session_finalize(session_id="rt-1")
+    assert [event["call"]["kind"] for event in fake.sent] == ["stopped"]

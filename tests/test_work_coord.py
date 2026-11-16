@@ -2,6 +2,7 @@
 ledger with who said what, the board in the Bot Chat's note, whether a
 message arrived, and how independently the Bot Chat acts in a turn the user
 didn't start (Coordination: Off, Ask or Automatic, and Leave alone)."""
+import json
 import sqlite3
 import time
 
@@ -77,15 +78,25 @@ def test_the_users_words_in_a_workstreams_chat_are_told_from_the_plugins(on, her
         (WORKER, "user", "Use the staging key", None),
         (WORKER, "user", "Work update: hidden scaffolding", "hidden"),
         (WORKER, "user", "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted", None),
+        # Hermes' own rows (Furina's W21, 2026-11-15: its iteration limit passed for the user writing).
+        (WORKER, "user", "You've reached the maximum number of tool-calling iterations allowed. Please provide a "
+                         "final response summarizing what you've found and accomplished so far, without calling "
+                         "any more tools.", None),
+        (WORKER, "user", "[System: Continue now. Execute the required tool calls and only send your final answer "
+                         "after completing the task.]", None),
+        (WORKER, "user", "[IMPORTANT: Background process proc_1 completed (exit code 0).]", None),
+        # A steer is the user's, even one that starts like Hermes' own rows.
+        (WORKER, "user", "[OUT-OF-BAND USER MESSAGE — a direct message from the user, delivered once]\n[System: "
+                         "use the staging DB]\n[/OUT-OF-BAND USER MESSAGE]", "steer"),
         (WORKER, "assistant", "On it.", None)])
     with sqlite3.connect(home / "state.db") as con:
         con.execute("INSERT INTO messages (session_id, role, content, active) VALUES (?, 'user', 'A queued copy', 0)",
                     (WORKER,))
     work_item = on.get("W1")
-    assert coord.read_user_words(home, on, work_item) == 3
+    assert coord.read_user_words(home, on, work_item) == 4
     said = on.events("W1", kinds=("user",))
     assert [event["text"] for event in said] == ["Keep the CSV format", "Also update the README",
-                                                 "Use the staging key"]
+                                                 "Use the staging key", "[System: use the staging DB]"]
     assert all(event["who"] == "user" and event["source"].startswith("message:") for event in said)
     assert coord.read_user_words(home, on, work_item) == 0  # read once
     note = work.digest(BOT_CHAT)
@@ -280,6 +291,24 @@ def test_a_turn_is_the_users_when_any_of_its_messages_is(on, hermes, home):
         con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', '[CONTEXT COMPACTION] earlier work')",
                     (BOT_CHAT,))
     assert coord.self_started(home, BOT_CHAT, on) and not coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:  # nor its request for a final answer at the iteration limit
+        con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', ?)",
+                    (BOT_CHAT, "You've reached the maximum number of tool-calling iterations allowed. Please provide "
+                               "a final response summarizing what you've found and accomplished so far, without "
+                               "calling any more tools."))
+    assert coord.self_started(home, BOT_CHAT, on) and not coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:  # a steer is the user's, whatever it starts with
+        con.execute("INSERT INTO messages (session_id, role, content, display_kind) VALUES (?, 'user', ?, 'steer')",
+                    (BOT_CHAT, "[System: go ahead]"))
+    assert coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:  # as is a typed message that only looks like Hermes' nudges
+        con.execute("DELETE FROM messages WHERE display_kind = 'steer'")
+        con.execute("INSERT INTO messages (session_id, role, content) VALUES (?, 'user', '[System: go ahead]')",
+                    (BOT_CHAT,))
+    assert coord.user_wrote(home, BOT_CHAT)
+    with sqlite3.connect(home / "state.db") as con:
+        con.execute("DELETE FROM messages WHERE content = '[System: go ahead]'")
+    assert not coord.user_wrote(home, BOT_CHAT)
     with sqlite3.connect(home / "state.db") as con:  # a long turn's tool calls don't hide its prompt
         con.executemany("INSERT INTO messages (session_id, role, content, tool_calls) VALUES (?, 'assistant', '', ?)",
                         [(BOT_CHAT, '[{"id": "c"}]')] * 80)
@@ -420,10 +449,30 @@ def test_one_question_per_workstream_a_no_stands_and_one_question_covers_related
     note = work.digest(BOT_CHAT)
     assert "- P3 (about W1), asked just now, no answer yet: «Move W1 to v2 after all?» New since the last no: " \
            "«The v1 shutdown moved up to tonight.»" in note
+    # Rewording it without new keeps what was new; a different new replaces it (notifier 693).
+    assert call("work_propose", {"text": "Move W1 to v2 tonight?", "replaces": "P3"})["ok"]
+    assert "«Move W1 to v2 tonight?» New since the last no: «The v1 shutdown moved up to tonight.»" \
+        in work.digest(BOT_CHAT)
+    assert call("work_propose", {"text": "Move W1 to v2 tonight?", "replaces": "P3",
+                                 "new": "Staging already fails."})["ok"]
+    note = work.digest(BOT_CHAT)
+    assert "New since the last no: «Staging already fails.»" in note and "moved up to tonight" not in note
     # The Work panel names every workstream a question covers; older apps read ref and title.
     item, = [item for item in work.work_coord.app_items(on, {"W1": "Login bug", "W2": "Invoice count"})
              if item["id"] == "P1"]
     assert item["ref"] == "W1" and item["refs"] == ["W1", "W2"] and item["title"] == "Login bug · Invoice count"
+
+
+def test_a_question_about_three_workstreams_names_all_three(on, hermes, home):
+    on.set_max_running(3)
+    start()
+    start("Invoice count", "Count the invoices sent in March.")
+    start("Shed photos", "Tidy the garden shed photos.")
+    woken(home)
+    made = call("work_propose", {"text": "Pause all three for the night?", "refs": ["W1", "W2", "W3"]})
+    assert "It covers W1, W2 and W3" in made["note"]
+    again = call("work_propose", {"text": "Pause W2?", "ref": "W2"})
+    assert again["error"] == "already_asked" and "P1 about W1, W2 and W3 is still open" in again["note"]
 
 
 # What the user and the worker are told --------------------------------------------
@@ -492,3 +541,219 @@ def test_what_a_calls_workstream_found_waits_with_its_result(on, hermes, home, m
     monkeypatch.setattr(work, "_call_of", lambda row: "call-1")
     note = work.digest(BOT_CHAT)
     assert "you'll get it once the" in note and "· it found" not in note
+
+
+def test_a_question_is_answered_with_a_tap_and_a_yes_is_the_users_turn(on, hermes, home, monkeypatch):
+    """Approve or Decline on a question's card in Conduit is the user's own
+    answer: recorded with no Bot Chat turn, and a yes reaches the Bot Chat as
+    a work update whose turn isn't held as one it started itself."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    woken(home)
+    first = call("work_propose", {"text": "Stop W1: the API it ports to is gone.", "ref": "W1"})["id"]
+    listed = work.app_list(on.home)
+    assert listed["counts"]["questions"] == 1 and listed["counts"]["needs_you"] == 0
+    shown = next(item for item in listed["coordination"]["items"] if item["id"] == first)
+    assert shown["actions"] == ["approve", "decline"]
+    assert work.app_act(on.home, first, "stop")["error"] == "unknown_action"
+    assert work.app_act(on.home, "P9", "approve")["error"] == "no_such_work"
+    done = work.app_act(on.home, "p1", "approve")
+    assert done == {"ok": True, "id": "P1", "status": "approved"}
+    line, = batched()
+    assert line == "- P1 (about W1), approved by the user just now: «Stop W1: the API it ports to is gone.»"
+    kept, = on.outbox_rows("", "line_answer")  # written with the answer, once
+    assert kept["text"] == line and kept["target"] == BOT_CHAT
+    assert work.app_act(on.home, first, "decline")["error"] == "not_now"  # answered once
+    listed = work.app_list(on.home)
+    assert listed["counts"]["questions"] == 0
+    shown = next(item for item in listed["coordination"]["items"] if item["id"] == first)
+    assert shown["status"] == "approved" and shown["actions"] == []
+    assert "- P1 (about W1), approved by the user just now" in work.digest(BOT_CHAT)
+    # The update that carries their yes: Ask Me First doesn't hold what it approves.
+    assert call("work_stop", {"ref": "W1"})["error"] == "ask_first"
+    work._queue_wake(on.home, BOT_CHAT, line, kind="answer")
+    work._queue_wake(on.home, BOT_CHAT, "- W1 reported: done")
+    work._send_wake(on.home, BOT_CHAT)
+    sent = on.outbox_rows("", "wake")[-1]["text"]
+    assert sent.startswith("Work update from Conduit: the user answered what you asked them")
+    assert sent.index(line) < sent.index("Do what they said yes to now") < sent.index("- W1 reported: done")
+    _chat_db(home, [(BOT_CHAT, "user", sent, "hidden")])
+    assert call("work_stop", {"ref": "W1"})["ok"]
+    # Their tap answered that question only: another stays theirs to answer.
+    start("Docs", "Write the docs.", new=True)
+    second = call("work_propose", {"text": "Start the docs over.", "ref": "W2"})["id"]
+    assert call("work_propose", {"id": second, "answer": "approved"})["error"] == "not_the_user"
+    # A no is kept and starts no turn.
+    assert work.app_act(on.home, second, "decline")["status"] == "declined"
+    assert batched() == []
+    assert f"- {second} (about W2), declined by the user just now" in work.digest(BOT_CHAT)
+
+
+def test_a_question_about_resolved_work_is_withdrawn(on, hermes, home):
+    """Nothing is left to decide once every workstream a question is about
+    is resolved, so it stops waiting on the user; one with other open work,
+    or about no workstream, stays."""
+    start()
+    start("Docs", "Write the docs.", new=True)
+    woken(home)
+    one = call("work_propose", {"text": "Stop W1.", "ref": "W1"})["id"]
+    both = call("work_propose", {"text": "Merge W1 into W2.", "refs": ["W2", "W1"]})
+    assert both["error"] == "already_asked"
+    two = call("work_propose", {"text": "Pause W2 for the release.", "ref": "W2"})["id"]
+    loose = call("work_propose", {"text": "Start a workstream for the changelog."})["id"]
+    assert work.app_list(on.home)["counts"]["questions"] == 3
+    for ref in ("W1",):
+        on.update(ref, status="stopped", closed_at=time.time(), resolved_by="user")
+    listed = work.app_list(on.home)
+    assert listed["counts"]["questions"] == 2
+    assert [item["id"] for item in listed["coordination"]["items"] if item["kind"] == "proposal"] == [loose, two]
+    note = work.digest(BOT_CHAT)
+    assert f"- {one} " not in note and f"- {two} (about W2)" in note and f"- {loose}, asked" in note
+    assert work.app_act(on.home, one, "approve")["error"] == "not_now"
+    assert on.proposal(one)["status"] == "withdrawn"
+    # One asked about work that was already resolved has its decision to make.
+    again = call("work_propose", {"text": "Start W1 over with the new API.", "ref": "W1"})["id"]
+    assert again in [item["id"] for item in work.app_list(on.home)["coordination"]["items"] if item.get("actions")]
+    # A tap on a card drawn before its work was resolved: withdrawn there too.
+    on.update("W2", status="stopped", closed_at=time.time(), resolved_by="user")
+    assert work.app_act(on.home, two, "approve")["error"] == "not_now"
+    assert on.proposal(two)["status"] == "withdrawn" and on.outbox_rows("", "line_answer") == []
+
+
+def test_every_open_question_is_listed_with_its_card(on, hermes, home, monkeypatch):
+    """Each open question counts as needing the user, so each is in the
+    list to answer, however many there are and whatever else is listed."""
+    start()
+    woken(home)
+    asked = [on.proposal_add("", f"Question {number} about the release plan.") for number in range(1, 35)]
+    reads = []
+    real_open_questions = coord.open_questions
+    monkeypatch.setattr(coord, "open_questions", lambda store: reads.append(1) or real_open_questions(store))
+    listed = work.app_list(on.home)
+    # The count and the cards come from one read of the open questions (notifier #764).
+    assert len(reads) == 1
+    cards = [item["id"] for item in listed["coordination"]["items"] if item.get("actions")]
+    assert listed["counts"]["questions"] == len(asked) == len(cards) == 34
+    # One they answer keeps its card, answered, past all the open ones.
+    assert work.app_act(on.home, asked[0], "decline")["ok"]
+    listed = work.app_list(on.home)
+    done = next(item for item in listed["coordination"]["items"] if item["id"] == asked[0])
+    assert done["status"] == "declined" and done["actions"] == [] and listed["counts"]["questions"] == 33
+    # And past a day's flags and sends, though it was asked before them.
+    for number in range(40):
+        on.event_add("W1", "flag", "watch", f"Flag {number}.", detail="{}")
+    listed = work.app_list(on.home)["coordination"]["items"]
+    assert asked[0] in [item["id"] for item in listed] and any(item["kind"] == "flag" for item in listed)
+    # Unspaced scripts compare by character.
+    assert coord._same_words("เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลง", "เริ่มงานใหม่เพื่อเขียนบันทึกการเปลี่ยนแปลงไหม")
+
+
+def test_the_answered_cards_are_the_latest_answered(on, hermes, home):
+    """Past a dozen answered in a day, the Work panel keeps the ones answered
+    last: a question asked long ago and answered just now stays on it
+    (notifier #760)."""
+    woken(home)
+    asked = [on.proposal_add("", f"Unrelated question number {number}.") for number in range(coord.PROPOSALS_SHOWN + 2)]
+    now = time.time()
+    with on._db() as con:
+        # The first one asked is the last one answered.
+        for order, item in enumerate(asked[1:] + asked[:1]):
+            con.execute("UPDATE proposals SET status = 'approved', answered_at = ? WHERE id = ?",
+                        (now - 60 + order, item))
+    shown = [card["id"] for card in coord.app_items(on, {}) if card["kind"] == "proposal"]
+    assert len(shown) == coord.PROPOSALS_SHOWN
+    assert asked[0] in shown and asked[1] not in shown and asked[2] not in shown
+
+
+def test_a_tapped_yes_a_restart_caught_goes_out_once(on, hermes, home, monkeypatch):
+    """The yes and its line are one write, so a restart before the update
+    went out replays it: the same row, as the user's answer, once."""
+    monkeypatch.setattr(work, "WAKE_BATCH_S", 3600.0)
+    monkeypatch.setattr(work, "_bot_chat_of", lambda home: BOT_CHAT)
+    start()
+    woken(home)
+    asked = call("work_propose", {"text": "Stop W1: the API it ports to is gone.", "ref": "W1"})["id"]
+    assert work.app_act(on.home, asked, "approve")["ok"]
+    line, = batched()
+    for held in (work._wakes, work._wake_answers, work._wake_items):
+        held.clear()  # the restart: nothing of the old process is queued
+    monkeypatch.setattr(work, "_PROCESS_STARTED", time.time() + 1)
+    work._replay(on.home, on)
+    assert len(on.outbox_rows("", "line_answer")) == 1
+    work._send_wake(on.home, BOT_CHAT)
+    sent = on.outbox_rows("", "wake")[-1]["text"]
+    assert sent.startswith("Work update from Conduit: the user answered what you asked them")
+    assert sent.count(line) == 1
+    assert not [row for row in on.outbox_pending() if row["kind"] == "line_answer"]
+
+
+def test_a_pile_of_open_questions_takes_no_more(on, hermes, home):
+    """Every open question is a card the user answers, so the Bot Chat
+    can't keep adding them: past a dozen it rewords one or waits."""
+    woken(home)
+    for number in range(coord.PROPOSALS_SHOWN):
+        on.proposal_add("", f"Unrelated question number {number}.")
+    more = call("work_propose", {"text": "Start a workstream for the billing export audit."})
+    assert more["error"] == "too_many_open" and len(on.proposals_open()) == coord.PROPOSALS_SHOWN
+
+
+def test_a_question_about_no_workstream_isnt_asked_twice(on, hermes, home):
+    """A start the Bot Chat would make names no workstream, so the open
+    question itself is what a second one is held against: nearly the same
+    words are the same question, other words another."""
+    woken(home)
+    made = call("work_propose", {"text": "Start a workstream to write the changelog for 2.3."})["id"]
+    again = call("work_propose", {"text": "Start a workstream to write the 2.3 changelog?"})
+    assert again["error"] == "already_asked" and again["id"] == made
+    assert "nearly the same" in again["note"] and f"replaces {made}" in again["note"]
+    other = call("work_propose", {"text": "Start a workstream to audit the billing export."})
+    assert other["ok"] and other["id"] != made
+    # Reworded, it's still the one question.
+    assert call("work_propose", {"text": "Start the 2.3 changelog now that the notes are in.", "replaces": made})["ok"]
+    assert len(on.proposals_open()) == 2
+    # The same frame around something else is another question.
+    assert not coord._same_words("Start a workstream to fix the login bug.", "Start a workstream to fix the logout bug.")
+    assert not coord._same_words("Start a workstream to upgrade Postgres to 16.",
+                                 "Start a workstream to upgrade Postgres to 17.")
+    assert not coord._same_words("서버 로그 정리 작업을 시작할까요", "서버 백업 정리 작업을 시작할까요")
+    # A short name in capitals is a name too (notifier #760), at the tool as well.
+    assert not coord._same_words("Start a workstream to fix the SQL bug in the export.",
+                                 "Start a workstream to fix the CSS bug in the export.")
+    assert coord._same_words("Start a workstream to fix the bug in the export.",
+                             "Start a workstream to fix a bug in the export.")
+    sql = call("work_propose", {"text": "Start a workstream to fix the SQL bug in the export."})
+    css = call("work_propose", {"text": "Start a workstream to fix the CSS bug in the export."})
+    assert sql["ok"] and css["ok"] and css["id"] != sql["id"]
+    # Reworded into the other open one, it would be two cards asking the same.
+    into = call("work_propose", {"text": "Start a workstream to audit the billing export now.", "replaces": made})
+    assert into["error"] == "already_asked" and into["id"] == other["id"]
+    # Words in any language count, spaced or not.
+    asked = call("work_propose", {"text": "开始一个新的工作流来整理发布说明"})["id"]
+    same = call("work_propose", {"text": "开始一个新的工作流来整理发布说明吗"})
+    assert same["error"] == "already_asked" and same["id"] == asked
+    assert call("work_propose", {"text": "Начать работу над переводом документации."})["ok"]
+    assert call("work_propose", {"text": "Начать работу над переводом документации?"})["error"] == "already_asked"
+
+
+def test_an_update_that_never_went_out_gives_back_the_marks_it_pushed_out(on):
+    """Greptile on #827: a refused try on a full list takes back its own
+    mark and restores the oldest real one it pushed out."""
+    real = [f"real-{n}" for n in range(coord._ASK_WAKES_KEPT)]
+    on.set_meta(coord._ASK_WAKES, json.dumps(real))
+    before = coord.ask_wake_sent(on, "refused")
+    assert "real-0" not in json.loads(on.get_meta(coord._ASK_WAKES))
+    assert before == ["real-0"]
+    coord.ask_wake_unsent(on, "refused", before)
+    assert json.loads(on.get_meta(coord._ASK_WAKES)) == real
+
+
+def test_two_refused_updates_give_back_only_their_own_marks(on):
+    """DeepSeek on #827: one update's mark, taken back, never returns with
+    another's."""
+    on.set_meta(coord._ASK_WAKES, json.dumps(["real"]))
+    first = coord.ask_wake_sent(on, "a")
+    second = coord.ask_wake_sent(on, "b")
+    coord.ask_wake_unsent(on, "a", first)
+    coord.ask_wake_unsent(on, "b", second)
+    assert json.loads(on.get_meta(coord._ASK_WAKES)) == ["real"]

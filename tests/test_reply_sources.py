@@ -1,8 +1,8 @@
 """Reply-ready pushes only for the sources the user keeps on (#115)."""
+import os
 import importlib.util
 import pathlib
 import sys
-import tempfile
 import types
 
 import pytest
@@ -16,7 +16,7 @@ SAFARI = "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Version/18.0 Safari/605.1
 
 if "hermes_constants" not in sys.modules:
     _hermes_constants = types.ModuleType("hermes_constants")
-    _hermes_constants.get_hermes_home = lambda: pathlib.Path(tempfile.gettempdir())
+    _hermes_constants.get_hermes_home = lambda: pathlib.Path(os.environ["HERMES_HOME"])
     sys.modules["hermes_constants"] = _hermes_constants
 if "tools.clarify_tool" not in sys.modules:
     _tools = sys.modules.setdefault("tools", types.ModuleType("tools"))
@@ -184,6 +184,32 @@ def test_a_chat_open_on_conduit_and_desktop_is_conduits_while_conduit_has_it_on_
         assert plugin._source_notifies("tui", "bot-chat") is True
     finally:
         plugin.turn_surface.start_turn("bot-chat")
+
+
+def test_on_the_gateways_authority_a_turn_conduit_reported_is_conduits(tmp_path, monkeypatch):
+    # The authority binds no client to a turn and runs its chats as local
+    # sessions, so only Conduit's report ahead of the send says it sent it:
+    # its board rule and Settings > Notifications' Conduit switch apply.
+    monkeypatch.setattr(plugin, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(plugin.reply_sources, "current_transport", lambda: None)
+    monkeypatch.delitem(sys.__dict__, plugin.turn_surface._AUTHORITY_STORE, raising=False)
+    surfaces = plugin.turn_surface
+    surfaces.record_for_authority(surfaces.Report("local-1", surfaces.text_sha256("hi"), "iphone", "typed"))
+    assert plugin._turn_source("local", "local-1") is None, "before its turn starts"
+    assert surfaces.note(False, "hi", session_id="local-1")
+    assert plugin._turn_source("local", "local-1") == "conduit"
+    Store(tmp_path).set_notify("conduit", False)
+    assert plugin._source_notifies("local", "local-1") is False
+    # Another chat, and the next turn with no report (Desktop, the dashboard), stay unknown.
+    assert plugin._turn_source("local", "local-2") is None
+    surfaces.note(False, "from Desktop", session_id="local-1")
+    assert plugin._turn_source("local", "local-1") is None
+    assert plugin._source_notifies("local", "local-1") is True
+    # A turn that never reaches note() (Pulse's) doesn't keep an earlier mark.
+    surfaces.record_for_authority(surfaces.Report("local-1", surfaces.text_sha256("again"), "iphone", "typed"))
+    assert surfaces.note(False, "again", session_id="local-1")
+    surfaces.start_turn("local-1", "Pulse looked around")
+    assert plugin._turn_source("local", "local-1") is None
 
 
 def test_unreadable_fanout_clients_are_unknown():

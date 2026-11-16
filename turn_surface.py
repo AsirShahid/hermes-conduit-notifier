@@ -86,6 +86,9 @@ SURFACES = {
     "android": "the user's Android device",
     "wear": "the user's Wear OS watch",
     "android_auto": "Android Auto in the user's car",
+    # A widget's button (the Pulse widget's Do it, hermes-conduit#888): the
+    # user tapped it on the Home Screen and Conduit wrote the words.
+    "widget": "a button the user tapped on a Conduit widget, in words Conduit wrote",
 }
 INPUTS = ("typed", "spoken")
 # Said after the line where the surface changes what a good answer looks like.
@@ -96,6 +99,7 @@ HINTS = {
     "wear": "Its screen is small: keep the answer short, with no tables.",
     "android_auto": "They are likely driving: answer briefly, in plain sentences meant to be heard, "
                     "with no tables, links or lists.",
+    "widget": "Conduit isn't open: the user reads the answer later, in this chat.",
 }
 # Said for a message typed on a screen, where a clarify batch with open
 # questions shows as a form (hermes-conduit's ClarifyActivity.isForm). Only
@@ -337,6 +341,35 @@ _turn_entries_lock = threading.Lock()
 MAX_TURN_ENTRIES = 256
 
 
+# Chats whose running turn took a report Conduit (or the plugin's Watch
+# transports) kept for the gateway's session authority, by session id, as
+# note() saw the turn start. The authority runs a turn from its admitted
+# message and binds no client to it, so this is the only word that Conduit
+# sent it (reply_sources.turn_source has none there). Each turn's note()
+# rewrites its chat's mark.
+_authority_turns: "OrderedDict[str, bool]" = OrderedDict()
+
+
+def _mark_authority_turn(session_id: Any, from_conduit: bool) -> None:
+    if not isinstance(session_id, str) or not session_id:
+        return
+    with _turn_entries_lock:
+        _authority_turns.pop(session_id, None)
+        if from_conduit:
+            _authority_turns[session_id] = True
+            while len(_authority_turns) > MAX_TURN_ENTRIES:
+                _authority_turns.popitem(last=False)
+
+
+def sent_from_conduit_on_authority(session_id: Any) -> bool:
+    """Whether the running turn of ``session_id``, a chat the gateway's
+    session authority runs, is one Conduit reported sending."""
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    with _turn_entries_lock:
+        return _authority_turns.get(session_id, False)
+
+
 # The plugin's own work updates into a Bot Chat (work_broker.Broker.wake),
 # by their text, until their turn starts: Hermes binds such a turn to
 # whichever client has the chat open, Hermes Desktop or a browser, though no
@@ -391,6 +424,9 @@ def start_turn(session_id: Any, user_message: Any = None, clock: Callable[[], fl
         return
     with _turn_entries_lock:
         _woken.pop(session_id, None)
+        # A turn that never reaches note() (Pulse's) mustn't keep the last
+        # turn's mark that Conduit sent it.
+        _authority_turns.pop(session_id, None)
         key = user_message.strip() if isinstance(user_message, str) else None
         now = clock()
         times = [at for at in _wakes.get(key, []) if 0 <= now - at <= WAKE_TTL_S] if key else []
@@ -453,6 +489,7 @@ def note(from_conduit: bool, message: Any, transport: Any = None,
     try:
         # A chat the gateway's authority runs: its report is the evidence.
         kept = _take_for_authority(session_id, message, clock)
+        _mark_authority_turn(session_id, kept is not None)
         if kept is None and not from_conduit:
             return None
         if kept is None:

@@ -25,6 +25,7 @@ answered.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 import time
@@ -32,7 +33,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Callable, Iterator, Optional
 
 DIRECTORY = "conduit"
 FILE_NAME = "workstreams.db"
@@ -183,10 +184,12 @@ _JSON_FIELDS = ("requested_by", "executor", "reply_to", "progress")
 # Columns added after a registry's first version: (name, definition).
 _ADDED_COLUMNS = (("progress", "TEXT NOT NULL DEFAULT '{}'"), ("turn_at", "REAL NOT NULL DEFAULT 0"),
                   ("pinned_at", "REAL NOT NULL DEFAULT 0"), ("resolved_by", "TEXT NOT NULL DEFAULT ''"),
-                  ("reopened_at", "REAL NOT NULL DEFAULT 0"), ("left_alone_at", "REAL NOT NULL DEFAULT 0"))
+                  ("reopened_at", "REAL NOT NULL DEFAULT 0"), ("left_alone_at", "REAL NOT NULL DEFAULT 0"),
+                  ("host", "TEXT NOT NULL DEFAULT ''"))
 # The same for the outbox: when a send showed in its target's saved messages,
 # and whether a turn the Bot Chat started itself sent it (work_coord).
-_ADDED_OUTBOX_COLUMNS = (("delivered_at", "REAL NOT NULL DEFAULT 0"), ("own", "INTEGER NOT NULL DEFAULT 0"))
+_ADDED_OUTBOX_COLUMNS = (("delivered_at", "REAL NOT NULL DEFAULT 0"), ("own", "INTEGER NOT NULL DEFAULT 0"),
+                         ("host", "TEXT NOT NULL DEFAULT ''"))
 # A question about several workstreams names the rest in ``also`` (space
 # apart), ``ref`` keeping the first for older apps; ``new`` is what a
 # question asked again after a decline says came up since (Eric 2026-11-10).
@@ -239,6 +242,10 @@ class Work:
     # The user set it to Leave alone (0: not): the Bot Chat sends it nothing
     # and doesn't stop it in a turn the user didn't start.
     left_alone_at: float = 0.0
+    # The Hermes process that ran its latest turn ("pid:start time",
+    # host_stamp): only that process, or one after it, may take it for
+    # stopped by a restart (notifier#744). Empty: not known.
+    host: str = ""
 
     @property
     def active(self) -> bool:
@@ -583,7 +590,8 @@ class Store:
         The row as written, or None when nothing was (no row, or not in
         those states)."""
         allowed = {"session_id", "status", "last_result", "error", "title", "goal", "cwd", "repo", "seen_at",
-                   "closed_at", "turn_at", "pinned_at", "resolved_by", "reopened_at", "left_alone_at", *_JSON_FIELDS}
+                   "closed_at", "turn_at", "pinned_at", "resolved_by", "reopened_at", "left_alone_at", "host",
+                   *_JSON_FIELDS}
         unknown = set(fields) - allowed
         if unknown:
             raise ValueError(f"unknown fields {sorted(unknown)}")
@@ -595,8 +603,8 @@ class Store:
             fields["title"] = _clip(fields["title"], TITLE_CHARS)
         values = {key: (json.dumps(value) if key in _JSON_FIELDS else value) for key, value in fields.items()}
         # Seen marks, a worker's checklist and the user's pin aren't changes
-        # the coordinator's "new since your last turn" is about.
-        if set(fields) - {"seen_at", "progress", "turn_at", "pinned_at", "left_alone_at"}:
+        # the coordinator's "new since your last turn" is about, nor is which process runs it.
+        if set(fields) - {"seen_at", "progress", "turn_at", "pinned_at", "left_alone_at", "host"}:
             values["updated_at"] = time.time()
         if not values:
             return self.get(ref)
@@ -617,19 +625,23 @@ class Store:
         with self._db() as con:
             con.executemany("UPDATE work SET seen_at = ? WHERE ref = ?", [(now, ref) for ref in refs])
 
-    def interrupt_running(self, live_session_ids: set[str], *, before: Optional[float] = None) -> list[str]:
+    def interrupt_running(self, live_session_ids: set[str], *, before: Optional[float] = None,
+                          hosted_elsewhere: Optional[Callable[[str], bool]] = None) -> list[str]:
         """Rows that say they're running on a session this process doesn't
         have live: a restart stopped them. Marked interrupted (never
         continued here: that's the restart sweep's call), their refs back.
         With ``before``, only rows made before then (when the live set was
-        read), so a start made since isn't caught."""
+        read), so a start made since isn't caught. With ``hosted_elsewhere``,
+        a row whose ``host`` it says is another live process is left alone:
+        that process runs it, and no restart stopped it (notifier#744)."""
         if not self.path.is_file():
             return []
         with self._db() as con:
-            rows = con.execute("SELECT ref, session_id FROM work WHERE kind = 'workstream' AND closed_at = 0 AND "
-                               "status IN ('starting', 'running', 'needs_you') AND created_at < ?",
+            rows = con.execute("SELECT ref, session_id, host FROM work WHERE kind = 'workstream' AND closed_at = 0 "
+                               "AND status IN ('starting', 'running', 'needs_you') AND created_at < ?",
                                (before if before is not None else float("inf"),)).fetchall()
-            stopped = [row["ref"] for row in rows if row["session_id"] not in live_session_ids]
+            stopped = [row["ref"] for row in rows if row["session_id"] not in live_session_ids
+                       and not (hosted_elsewhere is not None and hosted_elsewhere(row["host"]))]
             now = time.time()
             con.executemany("UPDATE work SET status = 'interrupted', updated_at = ? WHERE ref = ?",
                             [(now, ref) for ref in stopped])
@@ -697,11 +709,13 @@ class Store:
     def outbox_add(self, ref: str, kind: str, target: str, text: str, own: bool = False) -> str:
         """Written before Hermes is asked, so a send a restart cut off can be
         found and checked against the target's transcript. ``own``: sent
-        from a turn the Bot Chat started itself."""
+        from a turn the Bot Chat started itself. Its ``host`` is the process
+        writing it, which settles it while it runs (notifier#744)."""
         item = f"out-{uuid.uuid4().hex[:16]}"
         with self._db() as con:
-            con.execute("INSERT INTO outbox (id, ref, kind, target, text, created_at, own) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (item, ref, kind, target, text, time.time(), 1 if own else 0))
+            con.execute("INSERT INTO outbox (id, ref, kind, target, text, created_at, own, host) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)", (item, ref, kind, target, text, time.time(), 1 if own else 0,
+                                                            host_stamp()))
         return item
 
     def outbox_delivered(self, item: str) -> None:
@@ -731,6 +745,29 @@ class Store:
         rows = self._read("SELECT id, outcome, accepted_at, delivered_at FROM outbox WHERE kind = 'send' AND id IN "
                           f"({', '.join('?' for _ in ids)})", tuple(ids))
         return {row["id"]: row for row in rows}
+
+    def outbox_refs_of(self, ids: list[str], kind: str) -> list[str]:
+        """The refs the rows with these ids and this kind were written for."""
+        ids = [item for item in dict.fromkeys(ids) if item][:500]
+        if not ids:
+            return []
+        rows = self._read(f"SELECT ref FROM outbox WHERE kind = ? AND ref != '' AND id IN "
+                          f"({', '.join('?' for _ in ids)}) ORDER BY created_at", (kind, *ids))
+        return [row["ref"] for row in rows]
+
+    def outbox_texts_of(self, ids: list[str], kind: str) -> list[tuple[str, str]]:
+        """(ref, text) of the rows with these ids and this kind."""
+        ids = [item for item in dict.fromkeys(ids) if item][:500]
+        if not ids:
+            return []
+        rows = self._read(f"SELECT ref, text FROM outbox WHERE kind = ? AND ref != '' AND id IN "
+                          f"({', '.join('?' for _ in ids)}) ORDER BY created_at", (kind, *ids))
+        return [(row["ref"], row["text"]) for row in rows]
+
+    def outbox_count_since(self, kind: str, target: str, since: float) -> int:
+        rows = self._read("SELECT COUNT(*) AS n FROM outbox WHERE kind = ? AND target = ? AND created_at >= ?",
+                          (kind, target, since))
+        return int(rows[0]["n"]) if rows else 0
 
     def own_sends_since(self, ref: str, since: float) -> int:
         rows = self._read("SELECT COUNT(*) AS n FROM outbox WHERE ref = ? AND kind = 'send' AND own = 1 AND "
@@ -842,26 +879,66 @@ class Store:
         wanted = set(refs)
         return next((row for row in rows if wanted & set(proposal_refs(row))), None)
 
-    def proposal_answer(self, item: str, status: str, answer: str = "") -> Optional[dict]:
-        """The user's answer to an open proposal; None when it isn't open."""
+    def proposal_answer(self, item: str, status: str, answer: str = "", *, target: str = "",
+                        line: Optional[Callable[[dict], str]] = None) -> Optional[dict]:
+        """The user's answer to an open proposal; None when it isn't open.
+        With ``target`` and ``line`` (the answer's line for that Bot Chat's
+        next work update), the line is in the outbox in the same write, as
+        ``outbox`` on the row: an answer a restart catches before its update
+        is queued still goes out (``line_answer``)."""
         if status not in ("approved", "declined"):
             raise ValueError(f"unknown answer {status}")
         with self._db() as con:
             changed = con.execute("UPDATE proposals SET status = ?, answer = ?, answered_at = ? WHERE id = ? AND "
                                   "status = 'open'", (status, answer, time.time(), item)).rowcount
             row = con.execute("SELECT * FROM proposals WHERE id = ?", (item,)).fetchone() if changed else None
-        return dict(row) if row else None
+            done = dict(row) if row else None
+            if done is not None and target and line is not None:
+                done["outbox"] = f"out-{uuid.uuid4().hex[:16]}"
+                done["line"] = line(done)
+                con.execute("INSERT INTO outbox (id, ref, kind, target, text, created_at, own, host) "
+                            "VALUES (?, '', 'line_answer', ?, ?, ?, 0, ?)",
+                            (done["outbox"], target, done["line"], time.time(), host_stamp()))
+        return done
 
     def proposals(self, *, since: float = 0.0, limit: int = 20) -> list[dict]:
-        """The open ones, and those answered since then, oldest first."""
-        rows = self._read("SELECT * FROM proposals WHERE status = 'open' OR answered_at >= ? "
-                          "ORDER BY status = 'open' DESC, created_at DESC LIMIT ?", (since, limit))
+        """The open ones, and those the user answered since then, oldest first."""
+        rows = self._read("SELECT * FROM proposals WHERE status = 'open' OR (status != 'withdrawn' AND "
+                          "answered_at >= ?) ORDER BY status = 'open' DESC, created_at DESC LIMIT ?", (since, limit))
         return sorted(rows, key=lambda row: row["created_at"])
+
+    def proposals_answered(self, *, since: float = 0.0, limit: int = 20) -> list[dict]:
+        """The ``limit`` the user answered most recently since then (not
+        withdrawn ones), oldest asked first: one asked long ago and
+        answered last is among them."""
+        rows = self._read("SELECT * FROM proposals WHERE status NOT IN ('open', 'withdrawn') AND answered_at >= ? "
+                          "ORDER BY answered_at DESC LIMIT ?", (since, limit))
+        return sorted(rows, key=lambda row: row["created_at"])
+
+    def proposals_open(self) -> list[dict]:
+        """Every question still waiting on the user, oldest first."""
+        if not self.path.is_file():
+            return []
+        return self._read("SELECT * FROM proposals WHERE status = 'open' ORDER BY created_at")
+
+    def proposals_withdraw(self, items: list[str]) -> None:
+        """Open questions that need no answer any more (their work was
+        resolved): off the lists, and never the user's yes or no."""
+        with self._db() as con:
+            con.executemany("UPDATE proposals SET status = 'withdrawn', answered_at = ? WHERE id = ? AND "
+                            "status = 'open'", [(time.time(), item) for item in items])
 
     def outbox_done(self, item: str, outcome: str) -> None:
         with self._db() as con:
             con.execute("UPDATE outbox SET accepted_at = ?, outcome = ? WHERE id = ?",
                         (time.time() if outcome in ("accepted", "queued") else 0.0, outcome, item))
+
+    def outbox_drop(self, item: str) -> None:
+        """Forgets a row that never went out and is tried again as a new one
+        (a work update held for a busy Bot Chat's turn), so the retries
+        leave no trail of refused copies."""
+        with self._db() as con:
+            con.execute("DELETE FROM outbox WHERE id = ? AND accepted_at = 0", (item,))
 
     def outbox_rows(self, ref: str, kind: str) -> list[dict]:
         if not self.path.is_file():
@@ -878,6 +955,19 @@ class Store:
         with self._db(write=False) as con:
             rows = con.execute("SELECT * FROM outbox WHERE accepted_at = 0 AND outcome = '' ORDER BY created_at").fetchall()
         return [dict(row) for row in rows]
+
+
+def host_stamp() -> str:
+    """This Hermes process, as a workstream's or a pending send's host:
+    "pid:start time", the start time (psutil's, as Hermes' own session
+    leases pair it) telling a reused pid apart; "pid:" when it can't be read."""
+    try:
+        import psutil  # a Hermes dependency
+
+        started = f"{float(psutil.Process(os.getpid()).create_time()):.3f}"
+    except Exception:  # noqa: BLE001 — the pid alone still names the process
+        started = ""
+    return f"{os.getpid()}:{started}"
 
 
 def _add_columns(con: sqlite3.Connection) -> None:

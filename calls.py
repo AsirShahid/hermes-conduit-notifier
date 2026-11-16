@@ -388,6 +388,28 @@ def cancel_alerts(session_id: str, kind: str | None = None) -> None:
         logger.warning("Conduit could not cancel an alert call", exc_info=True)
 
 
+def keep_waiting_card(request_id: str, decision: Any) -> bool:
+    """The relay holds a question and takes answers for it
+    (``CallStore.keep_waiting_card``): the Needs you list hands Conduit its
+    card from now on. Never raises: False when the store couldn't be
+    written, so the caller tries again."""
+    try:
+        _store(get_hermes_home()).keep_waiting_card(request_id, decision)
+        return True
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not keep a question's card on the waiting list", exc_info=True)
+        return False
+
+
+def forget_waiting_card(request_id: str) -> None:
+    """A question's card can no longer be answered (``CallStore.forget_waiting_card``):
+    the Needs you list stops handing it to Conduit. Never raises."""
+    try:
+        _store(get_hermes_home()).forget_waiting_card(request_id)
+    except Exception:  # noqa: BLE001
+        logger.warning("Conduit could not take a question's card off the waiting list", exc_info=True)
+
+
 def note_waiting(session_id: str, kind: str, *, turn_session_id: str = "", **detail: Any) -> bool:
     """Keeps what Hermes waits on (``CallStore.note_waiting``) for Conduit's
     "Needs you" list, and for a call to read and answer: True when a call
@@ -813,16 +835,22 @@ def deliver(event: dict[str, Any], fallback: dict[str, Any] | None) -> None:
                 relay_failed = True
                 continue
             # The relay refused it, the profile lost its pairing, or the
-            # relay took it and Apple didn't: sending the same event again
-            # won't change that (a retry only answers "duplicate").
+            # relay took it and Apple didn't. The relay gives the id back
+            # after an Apple failure, so a retry would be sent again, but
+            # Apple just refused or couldn't be reached: the usual push
+            # goes instead, at once, rather than a ring that comes late.
             logger.warning("Conduit call request refused: %s", error)
             break
         except Exception as error:  # noqa: BLE001 — transport: try again
             sent_android = sent_android or bool(getattr(error, "android", 0))
             logger.warning("Conduit call request delivery failed: %s", error)
             continue
-        # A relay that failed after taking the event answers the retry as a
-        # duplicate without sending it again.
+        # After a failure, a duplicate doesn't say the call went: an older
+        # relay kept the id of an event it failed to send, and
+        # answers the retry as a duplicate without sending it. Today's
+        # relay gives a failed send's id back, so there a duplicate means an
+        # earlier try did go, and the usual push below comes as a second
+        # notice: one too many beats none.
         if not (relay_failed and isinstance(answer, dict) and answer.get("duplicate")):
             logger.info("Conduit call request: %s", call_delivery(answer))
             return
