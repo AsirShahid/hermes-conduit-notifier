@@ -552,6 +552,7 @@ routes:
   - POST /location/wipe
   - GET /memory/context
   - POST /memory/recall
+  - GET /model-usage
   - PUT /notifications/on-screen
   - GET /notifications/reply-sources
   - PUT /notifications/reply-sources

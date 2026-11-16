@@ -831,6 +831,21 @@ for a build), `fixed` and `ignored`. A report of a `queued` or `fixed` problem f
 `fixed_after_build` reopens it as `new` with `generation` raised, so a fix that didn't hold comes back. Capped at 30
 reports a minute; a body over 24,000 bytes is refused (413).
 
+## Model usage
+
+Favorites in Conduit's model sheet start with the models used most (capability `model-usage`), counted the way
+usage.asir.dev counts them: requests in Hermes' request ledger (`session_model_usage`), by the provider that served
+them, so a fallback's few requests stay its own.
+
+| Method | Path | Returns |
+|--------|------|---------|
+| GET | `/api/plugins/conduit_push/model-usage` | `{ok, window_days, half_life_days, recent_days, rows}`, each row `{provider, model, weight, requests, latest}` |
+
+A row's requests count in full when used today and half as much every 7 days since, over 90 days; a model with no
+requests in the last 14 days is left out however much it was used before. Auxiliary work (titles, compression, vision,
+approvals, background review) doesn't count. The newest 60 rows by weight, for the profile `?profile=` names; 30
+requests a minute.
+
 ## Personality for voice
 
 Conduit's voice modes can keep the agent's personality without reading stage

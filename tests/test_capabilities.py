@@ -150,6 +150,7 @@ def test_every_capability_names_a_served_route_family():
         "workspace-resolve": "/workspace/resolve",
         "hermes-config": "/hermes-config/memory",
         "device-reports": "/device-reports",
+        "model-usage": "/model-usage",
         "room-rules": "/rooms/",
         "room-forget": "/rooms/sessions",
         "room-links": "/rooms/links",

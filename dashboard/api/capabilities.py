@@ -221,6 +221,9 @@ ROUTE_CAPABILITIES = (
     # POST /device-reports: Conduit's crash and freeze reports, sent on their own
     # to this host (not a relay) and grouped for the triage cron job.
     "device-reports",
+    # GET /model-usage: how much each model was used, by the provider picked (not
+    # a fallback's), weighted to recent use, for Favorites in the model sheet.
+    "model-usage",
     "local-live",
     # GET/PUT /rooms/choices and /rooms/defaults: an agent's choices in rooms
     # with other people's agents, enforced on this host (Linked Rooms).

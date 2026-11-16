@@ -20,6 +20,7 @@ MODULES = (
     "memory",
     "hermes_config",
     "device_reports",
+    "model_usage",
     "gpt_live",
     "grok_live",
     "speech_server",

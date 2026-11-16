@@ -15,6 +15,8 @@ they run:
                           the profile's Hermes files
     device_reports        Conduit's crash and freeze reports, kept for automatic
                           triage
+    model_usage           How much each model is used, for Favorites in the
+                          model sheet
     gpt_live              GPT-Live on a ChatGPT/Codex subscription, or on this
                           host's OpenAI key
     grok_live             Grok Live: Conduit's realtime socket relayed to xAI

@@ -13,6 +13,11 @@ checks it). The format is fixed, because Conduit reads it:
 - One line per change, starting with `- `. Fixes say what goes wrong without
   the update. Plain words: these show on a phone.
 
+## 0.165.0 (2026-11-15)
+
+### New and improved
+- Conduit's model sheet can start Favorites with the models you use most, counted by requests the way usage.asir.dev counts them and weighted to the last few weeks, so a model you stopped using drops out and a fallback's few requests never make it a favorite.
+
 ## 0.164.0 (2026-11-15)
 
 ### New and improved
