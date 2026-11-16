@@ -338,17 +338,25 @@ def _push_note(home: Path, chat: str, note: str, key: str, *, failed: bool = Fal
     return True
 
 
-def say(text: str, title: str, *, send: Optional[Callable[..., Any]] = None, open_link: str = "") -> Optional[str]:
+def say(text: str, title: str, *, send: Optional[Callable[..., Any]] = None, open_link: str = "",
+        topic: str = "") -> Optional[str]:
     """A message from a script that can't wait for its job's run to end
     (a Duo number to match, a check stuck for hours): written into this
     profile's Bot Chat as a note titled ``title``, as a job's report is,
     and pushed. ``open_link`` (a conduit:// app link, e.g. conduit://meds) is
-    where the notification's tap goes instead of the Bot Chat. None once the
+    where the notification's tap goes instead of the Bot Chat. ``topic`` names
+    a topic chat (cron_topics) the note goes to instead. None once the
     note is written (a push that fails is only logged), else why it wasn't."""
     from hermes_constants import get_hermes_home
 
     home = Path(get_hermes_home()).resolve()
     chat = _bot_chat(home)
+    if topic:
+        # A topic the user keeps (cron_topics) takes the note instead of the Bot Chat, and the
+        # notification's tap opens that chat; one that doesn't resolve keeps the Bot Chat.
+        from .cron_topics import chat_of_topic
+
+        chat = chat_of_topic(home, topic) or chat
     if not chat:
         return "no Bot Chat yet, so the message has nowhere to show"
     note = note_text({"name": title or "Hermes"}, text)

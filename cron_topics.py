@@ -11,6 +11,9 @@ report and never written here, so a report never creates a chat. Anything that d
 existing, unarchived chat (no file, a job not filed, a topic without a chat, a chat deleted or
 archived since, a file that doesn't parse) leaves the report in the Bot Chat, as before.
 
+A script's own message (``hermes conduit-push say --topic "Server & maintenance"``) goes to a topic's
+chat the same way (``chat_of_topic``), and to the Bot Chat when the topic doesn't resolve.
+
 Only this profile's own Bot Chat deliveries are rerouted, and never a job set to "Let the bot act on
 it": that one needs a real turn in the Bot Chat (``cron_bot_chat._replacement`` hands it to Hermes
 before this is consulted).
@@ -54,7 +57,19 @@ def topic_chat(home: Path, job_id: Any) -> Optional[str]:
     if not (isinstance(jobs, dict) and isinstance(chats, dict) and job_id):
         return None
     topic = jobs.get(str(job_id))
-    chat = chats.get(topic) if isinstance(topic, str) else None
+    return _live_chat(home, topic, chats.get(topic) if isinstance(topic, str) else None)
+
+
+def chat_of_topic(home: Path, topic: Any) -> Optional[str]:
+    """The chat of a topic a script names (``say --topic``), or None for the Bot Chat: a topic the
+    file doesn't have, or whose chat is gone or archived."""
+    chats = _load(home).get("chats")
+    topic = topic.strip() if isinstance(topic, str) else ""
+    return _live_chat(home, topic, chats.get(topic) if isinstance(chats, dict) and topic else None)
+
+
+def _live_chat(home: Path, topic: Any, chat: Any) -> Optional[str]:
+    """``chat`` when it is an existing, unarchived chat of this profile, else None."""
     if not isinstance(chat, str) or not chat.strip():
         return None
     chat = chat.strip()

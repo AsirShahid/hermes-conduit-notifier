@@ -44,6 +44,9 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     say.add_argument("--title", default="Hermes", help="What the note and the notification are titled")
     say.add_argument("--open", default="", dest="open_link", metavar="LINK",
                      help="A Conduit app link the notification's tap opens instead of the Bot Chat (e.g. conduit://meds)")
+    say.add_argument("--topic", default="", metavar="TOPIC",
+                     help="A topic chat the message goes to instead of the Bot Chat, by its name in "
+                          "conduit-cron-topics.json (e.g. \"Server & maintenance\"); an unknown one keeps the Bot Chat")
     redact = commands.add_parser(
         "redact",
         help="Redact chat text from pushes; choice labels still transit so cards stay answerable",
@@ -328,10 +331,23 @@ def dispatch(args: argparse.Namespace) -> int:
         if not text.strip():
             print("Nothing to say: give the message as an argument or on stdin.")
             return 1
-        error = cron_bot_chat.say(text.strip(), str(args.title or "Hermes"), open_link=str(getattr(args, "open_link", "") or ""))
+        topic = str(getattr(args, "topic", "") or "").strip()
+        error = cron_bot_chat.say(text.strip(), str(args.title or "Hermes"), open_link=str(getattr(args, "open_link", "") or ""),
+                                  topic=topic)
         if error:
             print(f"Not posted to the Bot Chat: {error}")
             return 1
+        if topic:
+            from pathlib import Path as _Path
+
+            from hermes_constants import get_hermes_home as _home
+
+            from .cron_topics import chat_of_topic
+            if chat_of_topic(_Path(_home()).resolve(), topic):
+                print(f"Posted to the topic chat {topic}.")
+                return 0
+            print(f"No topic chat named {topic}: posted to the Bot Chat instead.")
+            return 0
         print("Posted to the Bot Chat.")
         return 0
     if action == "test":
