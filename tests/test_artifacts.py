@@ -448,6 +448,116 @@ def test_the_route_hides_missing_files_on_request(tmp_path, monkeypatch):
     assert client.get(f"{BASE}/artifacts?missing=bogus").status_code == 400
 
 
+# --- Boards conduit_show drew ------------------------------------------------------
+
+
+def _board_db(home: pathlib.Path, rows):
+    """A store whose messages keep tool_call_id, as Hermes' do: rows are
+    (session, role, content, tool_calls, tool_name, tool_call_id)."""
+    home.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(home / "state.db")
+    conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, title TEXT, hidden INTEGER NOT NULL DEFAULT 0,"
+                 " parent_session_id TEXT)")
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT,"
+                 " content TEXT, tool_call_id TEXT, tool_calls TEXT, tool_name TEXT, timestamp REAL)")
+    conn.execute("INSERT INTO sessions VALUES ('s1', 'Sports', 0, NULL)")
+    for number, (session, role, content, calls, name, call_id) in enumerate(rows, start=1):
+        conn.execute("INSERT INTO messages (session_id, role, content, tool_call_id, tool_calls, tool_name, timestamp)"
+                     " VALUES (?, ?, ?, ?, ?, ?, ?)", (session, role, content, call_id, calls, name,
+                                                       1_760_000_000 + number))
+    conn.commit()
+    conn.close()
+    return index.open_db(home)
+
+
+def _show_call(call_id, title, wrapped=False):
+    args = {"title": title, "cards": [{"type": "stats"}]}
+    if wrapped:
+        function = {"name": "tool_call", "arguments": json.dumps({"calls": [{"name": "conduit_show", "arguments": args}]})}
+    else:
+        function = {"name": "conduit_show", "arguments": json.dumps(args)}
+    return json.dumps([{"id": call_id, "type": "function", "function": function}])
+
+
+def _answer(*cards, ok=True, **extra):
+    return json.dumps({"ok": ok, "cards": list(cards), "markdown": "### md", "note": "On the user's screen.", **extra})
+
+
+TABLE = {"type": "table", "title": "Our 13 picks", "table": {"columns": ["Pick", "Player"], "rows": [["1.10", "Flagg"]]}}
+CHART = {"type": "chart", "title": "Where the gap came from", "chart": {"kind": "bar", "series": []}}
+
+
+def test_boards_are_listed_with_their_cards_and_title_only_when_asked(tmp_path, monkeypatch):
+    _no_gateway(monkeypatch)
+    conn = _board_db(tmp_path, [
+        ("s1", "assistant", "", _show_call("c1", "Draft review", wrapped=True), None, None),
+        ("s1", "tool", _answer(TABLE, CHART, layout="tabs", next=["Show waivers"]), None, "conduit_show", "c1"),
+        ("s1", "assistant", "MEDIA:/root/preview.md", None, None, None),
+    ])
+    assert [i["kind"] for i in _list(conn)["items"]] == ["document"]
+    items = _list(conn, include_boards=True)["items"]
+    assert [i["kind"] for i in items] == ["document", "board"]
+    board = items[1]
+    assert board["name"] == "Draft review" and board["source"] == "shown" and board["card_count"] == 2
+    assert board["session_title"] == "Sports" and board["message_id"] == 2 and "path" not in board
+    assert board["board"] == {"cards": [TABLE, CHART], "layout": "tabs", "next": ["Show waivers"], "markdown": "### md"}
+    assert [i["kind"] for i in _list(conn, group="boards")["items"]] == ["board"]
+    assert [i["name"] for i in _list(conn, include_boards=True, query="draft")["items"]] == ["Draft review"]
+
+
+def test_a_boards_title_comes_from_a_direct_call_else_its_cards(tmp_path):
+    conn = _board_db(tmp_path, [
+        ("s1", "assistant", "", _show_call("c1", "Roster check"), None, None),
+        ("s1", "tool", _answer(TABLE), None, "conduit_show", "c1"),
+        ("s1", "tool", _answer(TABLE, CHART, {"type": "stats", "title": "Third"}), None, "conduit_show", "unknown"),
+        ("s1", "tool", _answer({"type": "stats"}), None, "conduit_show", None),
+    ])
+    names = [i["name"] for i in _list(conn, group="boards")["items"]]
+    assert names == ["Board", "Our 13 picks, Where the gap came from +1", "Roster check"]
+
+
+def test_a_board_that_drew_nothing_is_not_listed(tmp_path):
+    conn = _board_db(tmp_path, [
+        ("s1", "tool", _answer(TABLE, ok=False), None, "conduit_show", None),
+        ("s1", "tool", json.dumps({"ok": True, "note": "Markdown only"}), None, "conduit_show", None),
+        ("s1", "tool", "not json", None, "conduit_show", None),
+    ])
+    assert _list(conn, group="boards")["items"] == []
+
+
+def test_a_live_board_is_listed_once_at_its_newest_showing(tmp_path):
+    status = lambda state: {"type": "status", "title": "Build", "live": "build", "status": {"state": state}}
+    conn = _board_db(tmp_path, [
+        ("s1", "tool", _answer(status("running")), None, "conduit_show", None),
+        ("s1", "tool", _answer(status("done")), None, "conduit_show", None),
+        ("s1", "tool", _answer(TABLE), None, "conduit_show", None),
+    ])
+    items = _list(conn, group="boards")["items"]
+    assert [i["message_id"] for i in items] == [3, 2]
+    assert items[1]["board"]["cards"][0]["status"]["state"] == "done"
+
+
+def test_a_board_too_big_to_carry_is_listed_without_its_cards(tmp_path, monkeypatch):
+    monkeypatch.setattr(index, "MAX_BOARD_CHARS", 50)
+    conn = _board_db(tmp_path, [("s1", "tool", _answer(TABLE), None, "conduit_show", None)])
+    (board,) = _list(conn, group="boards")["items"]
+    assert "board" not in board and board["card_count"] == 1
+
+
+def test_the_route_lists_boards_on_request(tmp_path, monkeypatch):
+    _board_db(tmp_path, [("s1", "tool", _answer(TABLE), None, "conduit_show", None)]).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    monkeypatch.setattr(api.workspace, "_workstreams", lambda home: [])
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    assert client.get(f"{BASE}/artifacts").json()["items"] == []
+    assert [i["kind"] for i in client.get(f"{BASE}/artifacts?boards=show").json()["items"]] == ["board"]
+    assert [i["kind"] for i in client.get(f"{BASE}/artifacts?kind=boards").json()["items"]] == ["board"]
+    assert client.get(f"{BASE}/artifacts?boards=bogus").status_code == 400
+
+
 # --- A file a reply names (hermes-conduit#1809) -----------------------------
 
 

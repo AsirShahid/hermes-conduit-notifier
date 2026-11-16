@@ -5,6 +5,11 @@ dashboard/manifest.json) and CHANGELOG.md always follow upstream: the nightly sy
 change never bumps the version and is written here instead. Older entries carry the number the fork used
 before it followed upstream's numbering; those numbers are not upstream's releases of the same name.
 
+## 2026-11-16 (on upstream 0.177.19)
+
+### New and improved
+- Boards Hermes draws in a chat (tables, charts, stats and the rest of `conduit_show`'s cards) are listed in Conduit's Artifacts with the files, pages and links, under their own Boards filter, each with its cards so Conduit can draw it again. A board's name is the title Hermes gave it. A status card Hermes kept up to date (a `live` card) is one board, listed at its newest. Only a Conduit that asks for boards gets them (capability `artifact-boards`), so the App Store app's lists are unchanged.
+
 ## 2026-11-15: numbered 0.165.0 in the fork
 
 ### New and improved

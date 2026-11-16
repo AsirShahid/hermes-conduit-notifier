@@ -80,15 +80,19 @@ def _workstreams(home: Any) -> List[str]:
 
 def list_artifacts(before: Optional[int] = None, session_ids: Optional[List[str]] = None,
                    kind: Optional[str] = None, q: str = "", limit: Optional[int] = None,
-                   missing: Optional[str] = None) -> Dict[str, Any]:
-    """One page of the profile's artifacts (called inside the profile scope)."""
+                   missing: Optional[str] = None, boards: Optional[str] = None) -> Dict[str, Any]:
+    """One page of the profile's artifacts (called inside the profile scope). ``boards=show`` lists the
+    boards Hermes drew with the rest (capability ``artifact-boards``); a Conduit that doesn't ask gets
+    none, since it has no way to show one."""
     from hermes_constants import get_hermes_home
 
     index = _artifacts_index()
     if kind and kind not in index.GROUPS:
-        raise core.TokenError(400, "kind must be images, pages, files or links")
+        raise core.TokenError(400, "kind must be images, pages, files, links or boards")
     if missing not in (None, "", "show", "hide"):
         raise core.TokenError(400, "missing must be show or hide")
+    if boards not in (None, "", "show", "hide"):
+        raise core.TokenError(400, "boards must be show or hide")
     try:
         conn = index.open_db(get_hermes_home())
     except FileNotFoundError:
@@ -102,7 +106,7 @@ def list_artifacts(before: Optional[int] = None, session_ids: Optional[List[str]
             return {"items": [], "next_before": None}
         return index.list_artifacts(conn, before=before, session_ids=ids, group=kind or None,
                                     query=q or "", limit=index.DEFAULT_LIMIT if limit is None else limit,
-                                    include_missing=missing != "hide",
+                                    include_missing=missing != "hide", include_boards=boards == "show",
                                     workstreams=[] if ids else _workstreams(get_hermes_home()))
     finally:
         conn.close()
@@ -112,7 +116,7 @@ def list_artifacts(before: Optional[int] = None, session_ids: Optional[List[str]
 async def get_artifacts(response: Response, profile: Optional[str] = None, before: Optional[int] = None,
                         session_id: Optional[List[str]] = Query(None), kind: Optional[str] = None,
                         q: Optional[str] = None, limit: Optional[int] = None,
-                        missing: Optional[str] = None) -> Dict[str, Any]:
+                        missing: Optional[str] = None, boards: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     # The slot is freed exactly once: by the read when it ran, else by this
     # request (a read it gave up on before it started never runs).
@@ -125,7 +129,7 @@ async def get_artifacts(response: Response, profile: Optional[str] = None, befor
                 return {"items": [], "next_before": None}
             state["started"] = True
         try:
-            return list_artifacts(before, session_id, kind, q or "", limit, missing)
+            return list_artifacts(before, session_id, kind, q or "", limit, missing, boards)
         finally:
             _artifacts_slots.release()
 

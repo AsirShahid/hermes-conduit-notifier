@@ -56,14 +56,27 @@ MAX_SCAN_CHARS = 200_000
 # file checks stay bounded.
 MAX_ITEMS_PER_ROW = MAX_LIMIT
 
-KINDS = ("image", "video", "audio", "page", "document", "file", "link")
+KINDS = ("image", "video", "audio", "page", "document", "file", "link", "board")
 # The chips Conduit shows, as filters on kind.
 GROUPS = {
     "images": ("image", "video"),
     "pages": ("page",),
     "files": ("audio", "document", "file"),
     "links": ("link",),
+    "boards": ("board",),
 }
+
+# A board: the cards ``conduit_show`` drew in a chat (tables, charts, stats, ...). The answer the chat's history
+# keeps carries them, so a board is listed with them for Conduit to draw again. Only for a client that asks
+# (``include_boards``, or the boards group): an older Conduit drops a kind it doesn't know, and the rows it
+# would drop would still fill its pages.
+BOARD_TOOL = "conduit_show"
+# Hermes' deferred-tool wrapper, which can carry a conduit_show call (and the board's title) inside it.
+_WRAPPER_TOOLS = {"tool_call"}
+# A board bigger than this is listed by name, without its cards (the largest so far was about 18 KB).
+MAX_BOARD_CHARS = 64_000
+# How far before its result the call that drew a board is looked for, in message ids.
+BOARD_CALL_WINDOW = 5_000
 
 _IMAGE = {"png", "jpg", "jpeg", "gif", "webp", "heic", "heif", "bmp", "svg", "tif", "tiff"}
 _VIDEO = {"mp4", "mov", "m4v", "webm", "mkv", "avi"}
@@ -372,6 +385,80 @@ def _file_size(path: str) -> Optional[int]:
     return info.st_size if not os.path.isdir(os.path.expanduser(path)) else None
 
 
+# --- Boards ------------------------------------------------------------------------
+
+
+def board_answer(content: Any) -> Optional[dict]:
+    """The board a ``conduit_show`` answer kept (``ok`` with cards drawn), else None: a call that drew
+    nothing, or one turned away."""
+    payload = _json(content)
+    if not isinstance(payload, dict) or payload.get("ok") is not True or not isinstance(payload.get("cards"), list):
+        return None
+    cards = [card for card in payload["cards"] if isinstance(card, dict)]
+    return {**payload, "cards": cards} if cards else None
+
+
+def board_title(conn: sqlite3.Connection, row: sqlite3.Row, has_call_id: bool) -> str:
+    """The title Hermes gave the board (conduit_show's required ``title``), read from the call that drew
+    it, directly or inside the deferred-tool wrapper; "" when that can't be told."""
+    call_id = row["tool_call_id"] if has_call_id else None
+    if not isinstance(call_id, str) or not call_id.strip():
+        return ""
+    found = conn.execute(
+        "SELECT tool_calls FROM messages WHERE session_id = ? AND role = 'assistant' AND id < ? AND id >= ?"
+        " AND tool_calls LIKE ? ORDER BY id DESC LIMIT 1",
+        (row["session_id"], int(row["id"]), int(row["id"]) - BOARD_CALL_WINDOW, f"%{call_id}%")).fetchone()
+    calls = _json(found[0]) if found else None
+    for call in calls if isinstance(calls, list) else []:
+        if not isinstance(call, dict) or call_id not in (call.get("id"), call.get("call_id")):
+            continue
+        function = call["function"] if isinstance(call.get("function"), dict) else call
+        name, args = str(function.get("name") or ""), _json(function.get("arguments"))
+        if name in _WRAPPER_TOOLS and isinstance(args, dict):
+            inner = [each for each in args.get("calls") or []
+                     if isinstance(each, dict) and each.get("name") == BOARD_TOOL]
+            # Two boards in one wrapped call: which result is which isn't recorded, so neither is named.
+            args = _json(inner[0].get("arguments")) if len(inner) == 1 else None
+        elif name != BOARD_TOOL:
+            args = None
+        title = args.get("title") if isinstance(args, dict) else None
+        return title.strip() if isinstance(title, str) else ""
+    return ""
+
+
+def _card_titles(cards: list) -> str:
+    titles = [card["title"].strip() for card in cards if isinstance(card.get("title"), str) and card["title"].strip()]
+    return ", ".join(titles[:2]) + (f" +{len(titles) - 2}" if len(titles) > 2 else "")
+
+
+def describe_board(conn: sqlite3.Connection, row: sqlite3.Row, title: str, has_call_id: bool) -> Optional[tuple]:
+    """``(key, item)`` for a ``conduit_show`` result row, or None when it drew no board. The item carries the
+    board (cards, layout, follow-ups, Markdown) for Conduit to draw again, unless it is over
+    ``MAX_BOARD_CHARS``. One board is listed once; cards with a ``live`` name are one board, listed at
+    their newest showing, since each showing replaced the last."""
+    content = row["content"]
+    answer = board_answer(content)
+    if answer is None:
+        return None
+    cards = answer["cards"]
+    name = board_title(conn, row, has_call_id) or _card_titles(cards) or "Board"
+    item: dict = {
+        "kind": "board",
+        "source": "shown",
+        "session_id": str(row["session_id"]),
+        "session_title": _clip(title, MAX_TITLE_CHARS),
+        "message_id": int(row["id"]),
+        "timestamp": _number(row["timestamp"]),
+        "name": _clip(name, MAX_NAME_CHARS),
+        "card_count": len(cards),
+    }
+    if isinstance(content, str) and len(content) <= MAX_BOARD_CHARS:
+        item["board"] = {key: answer[key] for key in ("cards", "layout", "next", "markdown") if key in answer}
+    live = sorted({card["live"].strip() for card in cards if isinstance(card.get("live"), str) and card["live"].strip()})
+    key = f"board-live:{row['session_id']}:{'|'.join(live)}" if live else f"board:{int(row['id'])}"
+    return key, item
+
+
 def _matches(item: dict, kinds: Optional[tuple], query: str) -> bool:
     if kinds is not None and item["kind"] not in kinds:
         return False
@@ -382,7 +469,7 @@ def _matches(item: dict, kinds: Optional[tuple], query: str) -> bool:
     return True
 
 
-def _candidate_sql(columns: set) -> str:
+def _candidate_sql(columns: set, boards: bool = False) -> str:
     """Cheap SQL prefilter: rows that could hold an artifact at all."""
     parts = [
         "(m.role = 'assistant' AND (m.content LIKE '%MEDIA:%' OR m.content LIKE '%::preview%'"
@@ -396,6 +483,8 @@ def _candidate_sql(columns: set) -> str:
     ]
     if "tool_calls" in columns:
         parts.append("(m.role = 'assistant' AND m.tool_calls LIKE '%write_file%')")
+    if boards and "tool_name" in columns:
+        parts.append(f"(m.role = 'tool' AND m.tool_name = '{BOARD_TOOL}')")
     return "(" + " OR ".join(parts) + ")"
 
 
@@ -507,6 +596,7 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
                    query: str = "", limit: int = DEFAULT_LIMIT,
                    include_missing: bool = True,
                    workstreams: Iterable[str] = (),
+                   include_boards: bool = False,
                    stat: Callable[[str], Optional[int]] = _file_size,
                    window_rows: int = WINDOW_ROWS, max_scan_rows: int = MAX_SCAN_ROWS) -> dict:
     """One page of artifacts, newest first, and where the next page starts
@@ -516,10 +606,12 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
     ``include_missing``, a file no longer on disk is left out, so a history
     of deleted files doesn't leave Conduit's pages mostly empty; links have
     no file and always stay. The profile's list leaves out ``workstreams``
-    and the chats that continue them."""
+    and the chats that continue them. Boards are listed with
+    ``include_boards`` or in the boards group only."""
     limit = max(1, min(int(limit), MAX_LIMIT))
     max_scan_rows = max(1, int(max_scan_rows))
     kinds = GROUPS.get(group) if group else None
+    boards = include_boards or group == "boards"
     query = " ".join(str(query or "").lower().split())[:MAX_QUERY_CHARS]
     message_columns = _columns(conn, "messages")
     session_columns = _columns(conn, "sessions")
@@ -527,11 +619,13 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
         raise RuntimeError("This Hermes keeps messages in a shape Conduit can't read")
     tool_calls = "m.tool_calls" if "tool_calls" in message_columns else "NULL"
     tool_name = "m.tool_name" if "tool_name" in message_columns else "NULL"
+    has_call_id = "tool_call_id" in message_columns
+    tool_call_id = "m.tool_call_id" if has_call_id else "NULL"
     title = "s.title" if "title" in session_columns else "NULL"
     select = (f"SELECT m.id, m.session_id, m.role, m.content, {tool_calls} AS tool_calls, "
-              f"{tool_name} AS tool_name, m.timestamp, {title} AS title "
+              f"{tool_name} AS tool_name, {tool_call_id} AS tool_call_id, m.timestamp, {title} AS title "
               "FROM messages m LEFT JOIN sessions s ON s.id = m.session_id ")
-    candidate = f" AND {_candidate_sql(message_columns)}"
+    candidate = f" AND {_candidate_sql(message_columns, boards)}"
     title_for = _titles(conn, "parent_session_id" in session_columns and "title" in session_columns)
 
     bounds = conn.execute("SELECT MIN(id), MAX(id) FROM messages").fetchone()
@@ -544,6 +638,13 @@ def list_artifacts(conn: sqlite3.Connection, *, before: Optional[int] = None,
 
     def take(row: sqlite3.Row) -> bool:
         """Lists the row's artifacts; True once the page is full."""
+        if row["role"] == "tool" and row["tool_name"] == BOARD_TOOL:
+            board = describe_board(conn, row, title_for(str(row["session_id"]), row["title"]), has_call_id) \
+                if boards else None
+            if board is not None and board[0] not in seen and _matches(board[1], kinds, query):
+                seen.add(board[0])
+                items.append(board[1])
+            return len(items) >= limit
         found = row_items(row["role"], row["content"], row["tool_calls"], row["tool_name"])
         for source, kind, target, label in found[:MAX_ITEMS_PER_ROW]:
             key = target.rstrip("/") if source != "link" else target

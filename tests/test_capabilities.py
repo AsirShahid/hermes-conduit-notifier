@@ -152,6 +152,7 @@ def test_every_capability_names_a_served_route_family():
         "local-live-agent": "/local-live/v1/tools",
         "artifacts": "/artifacts",
         "artifact-pins": "/artifacts/pins",
+        "artifact-boards": "/artifacts",
         "workspace-files": "/workspace/",
         "workspace-resolve": "/workspace/resolve",
         "hermes-config": "/hermes-config/memory",

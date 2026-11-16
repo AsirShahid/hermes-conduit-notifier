@@ -217,6 +217,9 @@ ROUTE_CAPABILITIES = (
     # /artifacts/pins: artifacts saved in Conduit, with a copy of each file
     # kept on the host (hermes-conduit#2467).
     "artifact-pins",
+    # GET /artifacts?boards=show (and kind=boards): the boards conduit_show drew, each with its cards so
+    # Conduit can draw it again (Android fork, Asir 2026-11-16).
+    "artifact-boards",
     # /workspace/*: the Folder tab's listings, search, recent files and file actions.
     "workspace-files",
     # GET /workspace/resolve: where a file a reply names by its name is, from
