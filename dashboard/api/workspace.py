@@ -386,7 +386,8 @@ async def delete_artifact_pin(response: Response, id: str, profile: Optional[str
 # tool calls (artifacts_index.resolve_name). Conduit asks when such a link is
 # tapped, with each id the chat goes by, and opens the Folder at the answer.
 
-def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[str]) -> Dict[str, Any]:
+def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[str],
+                 near: Optional[str] = None) -> Dict[str, Any]:
     """Where ``name`` is, for the profile's chat (called inside the profile scope)."""
     from hermes_constants import get_hermes_home
 
@@ -399,7 +400,8 @@ def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[
         return {"path": None}
     try:
         exists = _host_file_check(profile)
-        return index.resolve_name(conn, ids, name, exists=exists, default_folder=_terminal_folder())
+        return index.resolve_name(conn, ids, name, exists=exists, default_folder=_terminal_folder(),
+                                  near=near)
     finally:
         conn.close()
 
@@ -484,7 +486,8 @@ def _host_file_check(profile: Optional[str]) -> Callable[[str], bool]:
 
 @router.get("/workspace/resolve")
 async def get_workspace_resolve(response: Response, path: str, session_id: Optional[List[str]] = Query(None),
-                                profile: Optional[str] = None) -> Dict[str, Any]:
+                                profile: Optional[str] = None,
+                                near: Optional[str] = None) -> Dict[str, Any]:
     response.headers["Cache-Control"] = "no-store"
     no_store = {"Cache-Control": "no-store"}
     # The slot is freed exactly once, as for /artifacts.
@@ -497,7 +500,7 @@ async def get_workspace_resolve(response: Response, path: str, session_id: Optio
                 return {"path": None}
             state["started"] = True
         try:
-            return resolve_file(path, session_id, profile)
+            return resolve_file(path, session_id, profile, near)
         finally:
             _artifacts_slots.release()
 

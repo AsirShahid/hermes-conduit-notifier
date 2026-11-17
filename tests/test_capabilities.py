@@ -155,6 +155,7 @@ def test_every_capability_names_a_served_route_family():
         "artifact-boards": "/artifacts",
         "workspace-files": "/workspace/",
         "workspace-resolve": "/workspace/resolve",
+        "workspace-resolve-near": "/workspace/resolve",
         "hermes-config": "/hermes-config/memory",
         "device-reports": "/device-reports",
         "model-usage": "/model-usage",

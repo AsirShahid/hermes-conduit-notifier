@@ -226,6 +226,10 @@ ROUTE_CAPABILITIES = (
     # the chat's folder, its repository's top, the terminal's folder and its
     # own tool calls (hermes-conduit#1809).
     "workspace-resolve",
+    # GET /workspace/resolve?near=<folder>: a link in a file the Folder has open
+    # (a report naming `backup.json`) looks beside that file first, then where
+    # the chat put it, shell variables and `cd` included (Android fork, Asir 2026-11-17).
+    "workspace-resolve-near",
     # /hermes-config/*: Conduit's Hermes page, built-in memory entries (MEMORY.md
     # and USER.md) through Hermes' own store, OpenViking browse/search/read/
     # forget through its provider, and the profile's Hermes file paths.

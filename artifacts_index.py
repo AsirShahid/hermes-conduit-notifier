@@ -870,6 +870,7 @@ def _join_folder(folder: str) -> str:
 def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str, *,
                  exists: Optional[Callable[[str], bool]] = None,
                  default_folder: Optional[str] = None,
+                 near: Optional[str] = None,
                  max_rows: int = RESOLVE_MAX_ROWS) -> dict:
     """Where the file a chat's reply names as ``name`` (a bare name or a
     relative path) is: joined to the chat's working folder, then to its git
@@ -896,6 +897,10 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
         return {"path": None}
     if any(part == ".." for part in suffix.split("/")):
         return {"path": None}
+    # Android fork: a link in a file the Folder has open looks beside that file first.
+    beside = _near_folder(near)
+    if beside and (exists is None or exists(os.path.expanduser(f"{beside}/{suffix}"))):
+        return {"path": f"{beside}/{suffix}", "via": "near"}
     wanted = [sid for sid in session_ids if sid]
     chat = lineage(conn, wanted)
     session_columns = _columns(conn, "sessions")
@@ -961,6 +966,60 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
             for path in reversed(list(_path_tokens(text, suffix, quoted_whole=host_checks))):
                 if found(path):
                     return {"path": path, "via": "chat"}
+            # Android fork: a path the row's command built from its own variable or `cd`.
+            for path in (_shell_paths(text, suffix) if host_checks else ()):
+                if found(path):
+                    return {"path": path, "via": "chat"}
         if len(checked) >= MAX_RESOLVE_CANDIDATES:
             break
     return {"path": None}
+
+
+# Android fork (Asir, 2026-11-17): a report named `1789007399246.v9-20261117-pre-fold.json`, a backup
+# its chat made as `D=<folder>; cp $D/1789007399246.json $D/1789007399246.v9-20261117-pre-fold.json`;
+# no message held the whole path, and the link in the report looked beside the report.
+
+def _near_folder(near: Optional[str]) -> str:
+    """The folder of the file a link was tapped in, when it's an absolute one
+    that doesn't climb; "" otherwise."""
+    folder = _join_folder(near or "")
+    if not folder or folder.startswith("//") or any(part == ".." for part in folder.split("/")):
+        return ""
+    return folder
+
+
+# A value or `cd` folder is a whole word: stopped by a quote, a separator or an escape.
+_SHELL_VALUE = r"""((?:~/|/)[^\s"'`;&|()<>\\$]*)"""
+_SHELL_START = r"""(?:^|(?<=[\s;&|("'\\]))"""
+_SHELL_ASSIGN_RE = re.compile(_SHELL_START + r"""(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)=\\?["']?""" + _SHELL_VALUE)
+_SHELL_CD_RE = re.compile(_SHELL_START + r"""cd\s+\\?["']?""" + _SHELL_VALUE)
+_SHELL_USE_RE = re.compile(r"""\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))(/[^\s"'`;&|()<>\\$]+)""")
+_RELATIVE_PATH_RE = re.compile(r"""(?<![A-Za-z0-9_.~/$}@+-])[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)+""")
+
+
+def _shell_paths(text: str, suffix: str) -> Iterable[str]:
+    """Paths ending in ``suffix`` that a command in ``text`` names through a
+    variable it set (``D=/srv/m; cp $D/a.json $D/a.bak.json``) or relative to
+    a folder it changed to (``cd /srv/app && cp m/a.json m/a.bak.json``), in
+    the order they appear. Only the same row's assignments count: another
+    command's variable may have held anything."""
+    if suffix.rsplit("/", 1)[-1] not in text:
+        return
+    # A command inside a tool call's JSON keeps its line breaks escaped (`EOF\\nD=/srv`).
+    text = text.replace("\\n", "\n").replace("\\t", "\t")
+    folders = {match.group(1): match.group(2).rstrip("/") for match in _SHELL_ASSIGN_RE.finditer(text)}
+    if folders:
+        for match in _SHELL_USE_RE.finditer(text):
+            base = folders.get(match.group(1) or match.group(2))
+            path = base and _path_candidate(base + match.group(3), suffix, strip=_TRAILING + "'\"\\")
+            if path:
+                yield path
+    for match in _SHELL_CD_RE.finditer(text):
+        folder = match.group(1).rstrip("/")
+        if not folder or folder == "~":
+            continue
+        yield f"{folder}/{suffix}"
+        for relative in _RELATIVE_PATH_RE.finditer(text):
+            path = relative.group(0).rstrip(_TRAILING)
+            if path.endswith("/" + suffix) and ".." not in path.split("/"):
+                yield f"{folder}/{path}"

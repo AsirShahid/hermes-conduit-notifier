@@ -5,6 +5,11 @@ dashboard/manifest.json) and CHANGELOG.md always follow upstream: the nightly sy
 change never bumps the version and is written here instead. Older entries carry the number the fork used
 before it followed upstream's numbering; those numbers are not upstream's releases of the same name.
 
+## 2026-11-17 (on upstream 0.177.19)
+
+### Fixed
+- A file a reply or a report names by its name alone opens where it is (capability `workspace-resolve-near`). A link tapped inside a file the Folder has open (`?near=<that file's folder>`) looks beside that file first, then where the chat put it. The chat's own commands now count when they built the path from a shell variable they set (`D=<folder>; cp $D/a.json $D/a.bak.json`) or relative to a folder they `cd` into, which is how backups and copies are usually made. Before, `REPORT.md`'s link to `1789007399246.v9-20261117-pre-fold.json` (a backup made through `$D`) looked only beside the report and ended at "File not found".
+
 ## 2026-11-16 (on upstream 0.177.19)
 
 ### New and improved

@@ -583,6 +583,74 @@ def test_a_bare_name_resolves_to_the_path_the_chat_read_it_at(tmp_path):
     assert index.resolve_name(conn, ["s1"], "pState.swift", exists=lambda p: True) == {"path": None}
 
 
+def _terminal_call(command):
+    return json.dumps([{"function": {"name": "terminal", "arguments": json.dumps({"command": command})}}])
+
+
+def test_a_name_the_chat_wrote_through_a_shell_variable_or_after_cd_resolves(tmp_path):
+    # Asir, 2026-11-17: a report named `1789007399246.v9-20261117-pre-fold.json`, a backup the chat
+    # made as `D=<folder>; cp $D/1789007399246.json $D/1789007399246.v9-20261117-pre-fold.json`, and
+    # the app said "File not found": no message held the whole path.
+    models = tmp_path / "rsom-radiology-stack" / "v2.1" / "deployed-models"
+    models.mkdir(parents=True)
+    for name in ("1789007399246.json", "1789007399246.v9-20261117-pre-fold.json", "README.md", "a.v17-pre.json"):
+        (models / name).write_text("{}")
+    report = tmp_path / "archive" / "REPORT.md"
+    report.parent.mkdir()
+    report.write_text("x")
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _terminal_call(
+            f"python3 - <<'EOF'\\nprint('dumped')\\nEOF\\nD={models}; cp $D/1789007399246.json $D/1789007399246.v9-20261117-pre-fold.json && "
+            f'cmp <(python3 -c "import json;m=json.load(open(\'$D/1789007399246.v9-20261117-pre-fold.json\'))") /dev/null')),
+        ("s1", "assistant", "", _terminal_call(
+            f"cd {models.parent} && cat >> deployed-models/README.md <<'EOF'\nPre-change: `a.v17-pre.json`\nEOF\n"
+            "cp deployed-models/a.json deployed-models/a.v17-pre.json")),
+        ("s1", "assistant", "", json.dumps([{"function": {"name": "write_file", "arguments": json.dumps({
+            "path": str(report), "content": "Pre-change models: `1789007399246.v9-20261117-pre-fold.json`."})}}])),
+    ])
+    check = lambda p: pathlib.Path(p).is_file()
+    assert index.resolve_name(conn, ["s1"], "1789007399246.v9-20261117-pre-fold.json", exists=check) == {
+        "path": str(models / "1789007399246.v9-20261117-pre-fold.json"), "via": "chat"}
+    assert index.resolve_name(conn, ["s1"], "${D}/README.md", exists=check) == {"path": None}
+    # After `cd <folder>`, the folder a relative path in the same command starts from.
+    assert index.resolve_name(conn, ["s1"], "a.v17-pre.json", exists=check) == {
+        "path": str(models / "a.v17-pre.json"), "via": "chat"}
+    assert index.resolve_name(conn, ["s1"], "deployed-models/README.md", exists=check)["path"] == str(models / "README.md")
+    # A variable another command set isn't this one's.
+    other = _db(tmp_path / "home2", [
+        ("s1", "assistant", "", _terminal_call(f"D={models}; ls $D")),
+        ("s1", "assistant", "", _terminal_call("cp $D/1789007399246.json $D/1789007399246.v9-20261117-pre-fold.json")),
+    ])
+    assert index.resolve_name(other, ["s1"], "1789007399246.v9-20261117-pre-fold.json", exists=check) == {"path": None}
+
+
+def test_a_link_in_an_open_file_looks_beside_that_file_first(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "plan.md").write_text("x")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "plan.md").write_text("x")
+    (elsewhere / "only-here.md").write_text("x")
+    conn = _db(tmp_path / "home", [
+        ("s1", "assistant", "", _read_call(str(elsewhere / "plan.md"))),
+        ("s1", "assistant", "", _read_call(str(elsewhere / "only-here.md"))),
+    ])
+    check = lambda p: pathlib.Path(p).is_file()
+    assert index.resolve_name(conn, ["s1"], "plan.md", exists=check, near=str(docs)) == {
+        "path": str(docs / "plan.md"), "via": "near"}
+    # Not beside it: the chat's own mention.
+    assert index.resolve_name(conn, ["s1"], "only-here.md", exists=check, near=str(docs)) == {
+        "path": str(elsewhere / "only-here.md"), "via": "chat"}
+    # A file opened outside any chat still looks beside itself.
+    assert index.resolve_name(conn, [], "plan.md", exists=check, near=str(docs))["path"] == str(docs / "plan.md")
+    assert index.resolve_name(conn, [], "only-here.md", exists=check, near=str(docs)) == {"path": None}
+    # Only an absolute folder that never climbs.
+    for near in ("docs", f"{docs}/../docs", "//mirror.example/docs", ""):
+        assert index.resolve_name(conn, [], "plan.md", exists=check, near=near) == {"path": None}
+    assert index.resolve_name(conn, [], "../plan.md", exists=lambda p: True, near=str(docs)) == {"path": None}
+
+
 def test_the_newest_existing_mention_wins_and_tool_output_counts(tmp_path):
     old = tmp_path / "old" / "report.json"
     new = tmp_path / "new" / "report.json"
@@ -733,6 +801,21 @@ def test_the_resolve_route_reads_the_profile_store(tmp_path, monkeypatch):
     assert body == {"ok": True, "path": str(tmp_path / "out" / "report.xlsx"), "via": "chat"}
     missing = client.get(f"{BASE}/workspace/resolve", params={"path": "nope.xlsx", "session_id": "s1"}).json()
     assert missing == {"ok": True, "path": None}
+
+
+def test_the_resolve_route_looks_beside_the_linking_file(tmp_path, monkeypatch):
+    _hermes_file_routes(monkeypatch)
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "plan.md").write_text("x")
+    _db(tmp_path, []).close()
+    monkeypatch.setattr(sys.modules["hermes_constants"], "get_hermes_home", lambda: tmp_path)
+    monkeypatch.setattr(api.workspace, "_artifacts_index", lambda: index)
+    app = FastAPI()
+    app.include_router(api.router, prefix=BASE)
+    client = TestClient(app)
+    body = client.get(f"{BASE}/workspace/resolve", params={"path": "plan.md", "near": str(tmp_path / "docs")}).json()
+    assert body == {"ok": True, "path": str(tmp_path / "docs" / "plan.md"), "via": "near"}
+    assert client.get(f"{BASE}/workspace/resolve", params={"path": "plan.md"}).json() == {"ok": True, "path": None}
 
 
 def test_a_hidden_room_the_chat_came_from_is_not_read(tmp_path):
