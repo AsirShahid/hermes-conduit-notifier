@@ -401,7 +401,7 @@ def resolve_file(name: str, session_ids: Optional[List[str]], profile: Optional[
     try:
         exists = _host_file_check(profile)
         return index.resolve_name(conn, ids, name, exists=exists, default_folder=_terminal_folder(),
-                                  near=near)
+                                  near=near, home=os.path.expanduser("~"))
     finally:
         conn.close()
 

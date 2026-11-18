@@ -587,6 +587,37 @@ def _terminal_call(command):
     return json.dumps([{"function": {"name": "terminal", "arguments": json.dumps({"command": command})}}])
 
 
+def test_a_path_named_from_the_home_folder_resolves_there_last(tmp_path):
+    # Asir, 2026-11-18: Hermes wrote `RSOM/MS1 2026-27/.../Study Guide.docx` from the home folder; the chat's
+    # folder is scratch and no message held the whole path.
+    home = tmp_path / "ubuntu"
+    session = home / "RSOM" / "MS1 2026-27" / "Medicine in Contemporary Society (MCS)" / "01 - Topical Session"
+    session.mkdir(parents=True)
+    (session / "official-assignment.txt").write_text("x")
+    (home / "notes.md").write_text("x")
+    scratch = home / "scratch"
+    (scratch / "RSOM").mkdir(parents=True)
+    conn = _db(tmp_path / "hermes", [("s1", "assistant", "It's under the MCS session folder.")])
+    check = lambda p: pathlib.Path(p).is_file()
+    name = "RSOM/MS1 2026-27/Medicine in Contemporary Society (MCS)/01 - Topical Session/official-assignment.txt"
+    assert index.resolve_name(conn, ["s1"], name, exists=check, default_folder=str(scratch), home=str(home)) == {
+        "path": str(session / "official-assignment.txt"), "via": "home"}
+    # Without the home folder it is not found, as before.
+    assert index.resolve_name(conn, ["s1"], name, exists=check, default_folder=str(scratch)) == {"path": None}
+    # A bare name is never guessed from the home folder, and a missing file is never invented.
+    assert index.resolve_name(conn, ["s1"], "notes.md", exists=check, home=str(home)) == {"path": None}
+    assert index.resolve_name(conn, ["s1"], "RSOM/missing.txt", exists=check, home=str(home)) == {"path": None}
+    # A profile whose files are on another machine (unchecked) gets no home guess.
+    unchecked = lambda p: True
+    unchecked.checks_host = False  # type: ignore[attr-defined]
+    assert index.resolve_name(conn, ["s1"], name, exists=unchecked, home=str(home)) == {"path": None}
+    # The chat's own folder still wins over the home folder.
+    (scratch / "RSOM" / "a.txt").write_text("x")
+    (home / "RSOM" / "a.txt").write_text("x")
+    assert index.resolve_name(conn, ["s1"], "RSOM/a.txt", exists=check, default_folder=str(scratch), home=str(home)) == {
+        "path": str(scratch / "RSOM" / "a.txt"), "via": "folder"}
+
+
 def test_a_name_the_chat_wrote_through_a_shell_variable_or_after_cd_resolves(tmp_path):
     # Asir, 2026-11-17: a report named `1789007399246.v9-20261117-pre-fold.json`, a backup the chat
     # made as `D=<folder>; cp $D/1789007399246.json $D/1789007399246.v9-20261117-pre-fold.json`, and

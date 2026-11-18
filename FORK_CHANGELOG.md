@@ -5,6 +5,11 @@ dashboard/manifest.json) and CHANGELOG.md always follow upstream: the nightly sy
 change never bumps the version and is written here instead. Older entries carry the number the fork used
 before it followed upstream's numbering; those numbers are not upstream's releases of the same name.
 
+## 2026-11-18 (on upstream 0.177.19)
+
+### Fixed
+- A path Hermes writes from your home folder (`RSOM/MS1 2026-27/.../official-assignment.txt`) opens when tapped even if the chat never printed the whole path. The lookup tries the chat's folders and its own messages first, as before; only then does it try the home folder, only for a path with a folder in it, and only when the file is really there. Before, such a tap ended at "isn't on the server".
+
 ## 2026-11-17 (on upstream 0.177.19)
 
 ### Fixed

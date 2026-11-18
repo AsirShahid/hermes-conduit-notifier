@@ -871,6 +871,7 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
                  exists: Optional[Callable[[str], bool]] = None,
                  default_folder: Optional[str] = None,
                  near: Optional[str] = None,
+                 home: Optional[str] = None,
                  max_rows: int = RESOLVE_MAX_ROWS) -> dict:
     """Where the file a chat's reply names as ``name`` (a bare name or a
     relative path) is: joined to the chat's working folder, then to its git
@@ -972,6 +973,15 @@ def resolve_name(conn: sqlite3.Connection, session_ids: Iterable[str], name: str
                     return {"path": path, "via": "chat"}
         if len(checked) >= MAX_RESOLVE_CANDIDATES:
             break
+    # Android fork (Asir, 2026-11-18): Hermes names files from the home folder
+    # (`RSOM/MS1 2026-27/.../official-assignment.txt`), and a chat that never printed
+    # the whole path still means that file. Last, only for a path with a folder,
+    # and only on a host that checks the file is there.
+    home_folder = _join_folder(home or "")
+    if home_folder and host_checks and exists is not None and "/" in suffix:
+        candidate = f"{home_folder}/{suffix}"
+        if exists(os.path.expanduser(candidate)):
+            return {"path": candidate, "via": "home"}
     return {"path": None}
 
 
